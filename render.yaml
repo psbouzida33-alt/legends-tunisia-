@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: legends-tunisia-bot
+    runtime: docker
+    plan: free
+    branch: main
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_LOGIN_MAX_ATTEMPTS
+        value: "6"
