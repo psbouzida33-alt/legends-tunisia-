@@ -132,6 +132,7 @@ VOICE_LEVEL_SKIP_CHANNEL_IDS = frozenset({
     BOT_VOICE_CHANNEL_ID,
 })
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
+BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "")
 BOT_BUILD_ID = "2026-07-08-rate-limit-safe"
 
 LEVEL_LOG_CHANNEL_ID = 1517921554510385242
@@ -300,13 +301,14 @@ active_giveaways: dict[int, asyncio.Event] = {}
 chat_mute_expiry_tasks: dict[int, asyncio.Task] = {}
 current_giveaway_view = None
 
-LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
+LOUNGE_ROOM_EMOJIS = ["🎙️", "🎧", "🔊", "🎵", "🎮", "💬", "🌟", "🔥", "🎉", "✨"]
 LOUNGE_ROOM_NAME_SUFFIX = " ✓"
 NSFW_ROOM_NAME_PREFIX = "🔞"
 
 
 def format_lounge_room_name(member_name: str) -> str:
-    return f"{LOUNGE_ROOM_NAME_PREFIX}{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
+    emoji = random.choice(LOUNGE_ROOM_EMOJIS)
+    return f"{emoji}|{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
 
 
 JOIN_TO_CREATE_CHANNELS = {
@@ -1390,19 +1392,24 @@ async def _close_text_ticket(
                 color=discord.Color.red(),
             )
         )
+    except discord.HTTPException as exc:
+        print(f"Ticket close notice failed: {exc}")
+
+    # Confirm to the closer BEFORE deleting the channel — an ephemeral followup
+    # sent after the channel is gone fails with "Unknown Channel" (10003) and
+    # crashes this callback (that was the bug: the button looked broken/errored
+    # every time, even though the channel itself got deleted fine).
+    try:
+        await interaction.followup.send("Ticket closed.", ephemeral=True)
+    except discord.HTTPException as exc:
+        print(f"Ticket close confirmation failed: {exc}")
+
+    try:
         await channel.delete(reason=f"Ticket closed by {closer}: {reason}")
     except discord.Forbidden:
-        return await interaction.followup.send(
-            "I cannot delete this ticket channel.",
-            ephemeral=True,
-        )
+        print(f"Cannot delete ticket channel {channel.id}: missing Manage Channels permission")
     except discord.HTTPException as exc:
-        return await interaction.followup.send(
-            f"Could not close the ticket. ({exc.text})",
-            ephemeral=True,
-        )
-
-    await interaction.followup.send("Ticket closed.", ephemeral=True)
+        print(f"Could not delete ticket channel {channel.id}: {exc.text}")
 
 
 async def _log_ticket_setup(guild: discord.Guild):
@@ -1916,7 +1923,9 @@ _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
     name = _strip_nsfw_room_prefix(channel_name)
-    if name.startswith(LOUNGE_ROOM_NAME_PREFIX) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
+    if name.endswith(LOUNGE_ROOM_NAME_SUFFIX) and any(
+        name.startswith(f"{emoji}|") for emoji in LOUNGE_ROOM_EMOJIS
+    ):
         return "lounge"
     if name.endswith("'s Lounge"):
         return "lounge"
