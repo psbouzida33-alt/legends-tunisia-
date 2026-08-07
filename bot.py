@@ -1576,8 +1576,16 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
         self.channel = channel
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.channel.edit(name=self.channel_name.value)
-        await interaction.response.send_message(f"Room name updated to: **{self.channel_name.value}**", ephemeral=True)
+        fresh = interaction.guild.get_channel(self.channel.id) or self.channel
+        # Keep the 🔞 label through a rename instead of silently dropping it —
+        # a plain text rename shouldn't undo the owner's 18+ toggle.
+        new_name = self.channel_name.value
+        if _channel_has_nsfw_label(fresh.name):
+            new_name = f"{NSFW_ROOM_NAME_PREFIX}{new_name}"
+        new_name = new_name[:100]
+
+        await self.channel.edit(name=new_name)
+        await interaction.response.send_message(f"Room name updated to: **{new_name}**", ephemeral=True)
 
 
 class ControlPanelView(discord.ui.View):
