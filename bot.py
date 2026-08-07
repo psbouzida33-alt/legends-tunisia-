@@ -1501,6 +1501,73 @@ class TransferOwnerView(discord.ui.View):
         self.add_item(TransferOwnerSelect(channel, owner_id))
 
 
+class KickSelect(discord.ui.Select):
+    def __init__(self, channel, owner_id: int):
+        self.channel = channel
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label=member.display_name, value=str(member.id), emoji="👞")
+            for member in channel.members
+            if not member.bot and member.id != owner_id
+        ]
+        if not options:
+            options = [
+                discord.SelectOption(label="No other members in the room", value="none", disabled=True)
+            ]
+
+        super().__init__(
+            placeholder="Select who to disconnect...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            return await interaction.response.send_message(
+                "There is no one else in the room to kick.",
+                ephemeral=True,
+            )
+
+        if interaction.user.id != owners.get(self.channel.id):
+            return await interaction.response.send_message(
+                "Only the room owner can kick members.",
+                ephemeral=True,
+            )
+
+        member_id = int(self.values[0])
+        target = interaction.guild.get_member(member_id)
+        if not target or not target.voice or not target.voice.channel or target.voice.channel.id != self.channel.id:
+            return await interaction.response.send_message(
+                "That user is no longer in your room.",
+                ephemeral=True,
+            )
+
+        try:
+            await target.move_to(None, reason=f"Kicked from room by {interaction.user}")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "I do not have permission to disconnect that member (check **Move Members**).",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            return await interaction.response.send_message(
+                f"Could not disconnect that member. ({exc.text})",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            f"Disconnected **{target.display_name}** from the room.",
+            ephemeral=True,
+        )
+
+
+class KickView(discord.ui.View):
+    def __init__(self, channel, owner_id: int):
+        super().__init__(timeout=60)
+        self.add_item(KickSelect(channel, owner_id))
+
+
 class RenameModal(discord.ui.Modal, title="Change Room Name"):
     channel_name = discord.ui.TextInput(label="New Room Name", placeholder="Enter channel name...", max_length=30, required=True)
 
@@ -1629,7 +1696,9 @@ class ControlPanelView(discord.ui.View):
             return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
-        await interaction.response.send_message("Choose who to disconnect:", view=KickView(channel), ephemeral=True)
+        await interaction.response.send_message(
+            "Choose who to disconnect:", view=KickView(channel, interaction.user.id), ephemeral=True
+        )
 
     async def transfer_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
