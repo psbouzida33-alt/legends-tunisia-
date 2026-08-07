@@ -270,8 +270,6 @@ async def _api_call_with_retry(coro_factory, *, label: str, attempts: int = 3):
 owners = {}
 room_kinds = {}
 room_nsfw_enabled: dict[int, bool] = {}
-room_nsfw_pending: dict[int, tuple[str, bool]] = {}
-room_nsfw_retry_tasks: dict[int, asyncio.Task] = {}
 owner_transfer_tasks = {}
 OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
@@ -603,53 +601,15 @@ async def _apply_nsfw_room_mark(
     room_nsfw_enabled[channel.id] = enabled
 
 
-async def _schedule_nsfw_room_retry(
-    guild_id: int,
-    channel_id: int,
-    new_name: str,
-    enabled: bool,
-    delay: float,
-) -> None:
-    existing = room_nsfw_retry_tasks.pop(channel_id, None)
-    if existing and not existing.done():
-        existing.cancel()
-
-    room_nsfw_pending[channel_id] = (new_name, enabled)
-
-    async def _retry() -> None:
-        try:
-            await asyncio.sleep(max(delay, 1))
-            pending = room_nsfw_pending.get(channel_id)
-            if pending != (new_name, enabled):
-                return
-            guild = bot.get_guild(guild_id)
-            if guild is None:
-                return
-            fresh = await guild.fetch_channel(channel_id)
-            if not isinstance(fresh, discord.VoiceChannel):
-                return
-            await _apply_nsfw_room_mark(
-                fresh,
-                new_name=new_name,
-                enabled=enabled,
-                reason="Room 18+ label retry",
-            )
-            room_nsfw_pending.pop(channel_id, None)
-            print(f"NSFW label retry ok for channel {channel_id}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print(f"NSFW label retry failed for {channel_id}: {exc}")
-        finally:
-            room_nsfw_retry_tasks.pop(channel_id, None)
-
-    room_nsfw_retry_tasks[channel_id] = asyncio.create_task(_retry())
-
-
 async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, str, float | None]:
     """Toggle 🔞 prefix on the voice channel name.
 
     Returns (enabled, display_name, retry_after_seconds if rate-limited else None).
+    On rate-limit, nothing is scheduled to happen later — the label only ever
+    changes when the owner presses the button and Discord accepts the rename
+    right then. (Previously this queued a background retry that could rename
+    the room automatically minutes later with no further input from the
+    owner, which looked like the label randomly flipping on its own.)
     """
     fresh = await channel.guild.fetch_channel(channel.id)
     if not isinstance(fresh, discord.VoiceChannel):
@@ -659,12 +619,6 @@ async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, s
     enabled = not has_label
     base_name = _strip_nsfw_room_prefix(fresh.name)
     new_name = f"{NSFW_ROOM_NAME_PREFIX}{base_name}"[:100] if enabled else base_name[:100]
-
-    pending = room_nsfw_pending.pop(fresh.id, None)
-    if pending:
-        retry_task = room_nsfw_retry_tasks.pop(fresh.id, None)
-        if retry_task and not retry_task.done():
-            retry_task.cancel()
 
     if fresh.name == new_name:
         room_nsfw_enabled[fresh.id] = enabled
@@ -682,14 +636,7 @@ async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, s
         if exc.status != 429:
             raise
         retry_after = float(getattr(exc, "retry_after", 0) or 600)
-        await _schedule_nsfw_room_retry(
-            channel.guild.id,
-            fresh.id,
-            new_name,
-            enabled,
-            retry_after + 1,
-        )
-        return enabled, new_name, retry_after
+        return has_label, fresh.name, retry_after
 
 
 PANEL_EMOJI_LOCK = discord.PartialEmoji(name="50376", id=1518983212066668675)
@@ -1735,10 +1682,9 @@ class ControlPanelView(discord.ui.View):
 
         if retry_after is not None:
             mins = max(1, int((retry_after + 59) // 60))
-            action = "ytetzad" if enabled else "yetsala7"
             return await interaction.followup.send(
-                f"⏳ Discord y7eb limit esm el room (2 marrat / 10 min).\n"
-                f"🔞 Label **{action}** automatiquement ba3d ~**{mins} min**. Ma tclickich kter.",
+                f"⏳ Discord y7eb limit esm el room (2 marrat / 10 min) — **ma tbadletch el label.**\n"
+                f"Stanna ~**{mins} min** w 3awed clicki 3al bouton bech tbadelha (ma yetbadelch b rasso).",
                 ephemeral=True,
             )
 
@@ -1945,10 +1891,6 @@ def _clear_temp_room_tracking(channel_id: int):
     owners.pop(channel_id, None)
     room_kinds.pop(channel_id, None)
     room_nsfw_enabled.pop(channel_id, None)
-    room_nsfw_pending.pop(channel_id, None)
-    retry_task = room_nsfw_retry_tasks.pop(channel_id, None)
-    if retry_task and not retry_task.done():
-        retry_task.cancel()
     locked_rooms.discard(channel_id)
 
 
