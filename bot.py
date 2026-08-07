@@ -2668,6 +2668,7 @@ async def on_ready():
 
     bot.add_view(GameRolePickerView())
     bot.add_view(TicketPanelView())
+    bot.add_view(PunishmentPanelView())
 
     for guild in bot.guilds:
         try:
@@ -4101,6 +4102,460 @@ async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
         msg += "\n⚠️ Counter updated, but some roles/mutes could not be removed."
 
     await ctx.send(msg, delete_after=12)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Punishment panel — button+modal UI over the same logic as the ? commands
+# above. Nothing about ?ban/?timeout/etc. changes; this just gives staff a
+# clickable alternative that reuses the exact same helpers (_post_punishment_card,
+# _can_punish_target, _apply_chat_mute, ...) so both stay in sync forever.
+# ---------------------------------------------------------------------------
+
+_MEMBER_INPUT_RE = re.compile(r"^<@!?(\d+)>$")
+
+
+def _resolve_member_input(guild: discord.Guild | None, raw: str | None) -> discord.Member | None:
+    if not guild or not raw:
+        return None
+    raw = raw.strip()
+    match = _MEMBER_INPUT_RE.match(raw)
+    id_str = match.group(1) if match else (raw if raw.isdigit() else None)
+    if id_str is None:
+        return None
+    try:
+        return guild.get_member(int(id_str))
+    except ValueError:
+        return None
+
+
+class _PanelNullMessage:
+    """Stand-in for ctx.message — the punishment helpers react to / delete the
+    invoking command message, but a modal submission has no message to touch."""
+
+    async def add_reaction(self, *_args, **_kwargs):
+        pass
+
+    async def delete(self, *_args, **_kwargs):
+        pass
+
+
+class _PanelCtx:
+    """Minimal ctx.author/ctx.guild/ctx.send shim so _post_punishment_card and
+    _finish_staff_command (written for prefix-command ctx objects) work unchanged
+    when called from a punishment-panel modal submission."""
+
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.message = _PanelNullMessage()
+
+    async def send(self, content=None, **kwargs):
+        kwargs.pop("delete_after", None)
+        kwargs.setdefault("ephemeral", True)
+        if not self.interaction.response.is_done():
+            await self.interaction.response.send_message(content, **kwargs)
+        else:
+            await self.interaction.followup.send(content, **kwargs)
+
+
+class PanelBanModal(discord.ui.Modal, title="Ban Member"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    reason_input = discord.ui.TextInput(
+        label="Reason", style=discord.TextStyle.paragraph, required=False, max_length=400
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not moderator.guild_permissions.ban_members:
+            return await interaction.followup.send("You need **Ban Members** permission.", ephemeral=True)
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if _is_ban_timeout_immune(member):
+            return await interaction.followup.send("❌ Ma tnajemch tbani had el membre (role protégé).", ephemeral=True)
+        if not interaction.guild.me.guild_permissions.ban_members:
+            return await interaction.followup.send("I need **Ban Members** permission.", ephemeral=True)
+
+        reason = self.reason_input.value or "No reason provided"
+        try:
+            await member.ban(reason=f"{moderator}: {reason}", delete_message_seconds=0)
+        except discord.Forbidden:
+            return await interaction.followup.send("I cannot ban this member.", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Ban failed: {exc.text}", ephemeral=True)
+
+        ok = await _post_punishment_card(_PanelCtx(interaction), "ban", member, reason)
+        if ok:
+            await interaction.followup.send(f"✅ Ban applied to {member.mention}.", ephemeral=True)
+
+
+class PanelTimeoutModal(discord.ui.Modal, title="Timeout Member"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    duration_input = discord.ui.TextInput(label="Duration (e.g. 30m, 2h, 1d)", max_length=20)
+    reason_input = discord.ui.TextInput(
+        label="Reason", style=discord.TextStyle.paragraph, required=False, max_length=400
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not moderator.guild_permissions.moderate_members:
+            return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if _is_ban_timeout_immune(member):
+            return await interaction.followup.send("❌ Ma tnajemch ttimeouti had el membre (role protégé).", ephemeral=True)
+
+        delta = _parse_duration(self.duration_input.value)
+        if not delta or delta > MAX_TIMEOUT:
+            return await interaction.followup.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", ephemeral=True)
+
+        reason = self.reason_input.value or "No reason provided"
+        until = discord.utils.utcnow() + delta
+        try:
+            await member.timeout(until, reason=f"{moderator}: {reason}")
+        except discord.Forbidden:
+            return await interaction.followup.send("I cannot timeout this member.", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Timeout failed: {exc.text}", ephemeral=True)
+
+        ok = await _post_punishment_card(_PanelCtx(interaction), "timeout", member, reason, duration=delta)
+        if ok:
+            await interaction.followup.send(f"✅ Timeout applied to {member.mention}.", ephemeral=True)
+
+
+class PanelChatMuteModal(discord.ui.Modal, title="Chat Mute Member"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    duration_input = discord.ui.TextInput(label="Duration (e.g. 30m, 2h, 1d)", max_length=20)
+    reason_input = discord.ui.TextInput(
+        label="Reason", style=discord.TextStyle.paragraph, required=False, max_length=400
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not moderator.guild_permissions.moderate_members:
+            return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+
+        delta = _parse_duration(self.duration_input.value)
+        if not delta or delta > MAX_TIMEOUT:
+            return await interaction.followup.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", ephemeral=True)
+
+        reason = self.reason_input.value or "No reason provided"
+        try:
+            await _apply_chat_mute(member, delta, moderator, reason)
+        except discord.Forbidden:
+            return await interaction.followup.send("I cannot mute this member (check **Manage Roles** / hierarchy).", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Chat mute failed: {exc.text}", ephemeral=True)
+
+        ok = await _post_punishment_card(_PanelCtx(interaction), "chatmute", member, reason, duration=delta)
+        if ok:
+            await interaction.followup.send(f"✅ Chat mute applied to {member.mention}.", ephemeral=True)
+
+
+class PanelVoiceMuteModal(discord.ui.Modal, title="Voice Mute Member"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    duration_input = discord.ui.TextInput(label="Duration (e.g. 30m, 2h, 1d)", max_length=20)
+    reason_input = discord.ui.TextInput(
+        label="Reason", style=discord.TextStyle.paragraph, required=False, max_length=400
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not moderator.guild_permissions.moderate_members:
+            return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+
+        delta = _parse_duration(self.duration_input.value)
+        if not delta or delta > MAX_TIMEOUT:
+            return await interaction.followup.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", ephemeral=True)
+
+        reason = self.reason_input.value or "No reason provided"
+        mute_reason = f"{moderator}: {reason}"
+        try:
+            await _safe_add_roles(member, [VOICE_MUTE_ROLE_ID], reason=mute_reason)
+            await _enforce_voice_mute_state(member, reason=mute_reason)
+        except discord.Forbidden:
+            return await interaction.followup.send("I cannot voice-mute this member (check **Manage Roles** / hierarchy).", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Voice mute failed: {exc.text}", ephemeral=True)
+
+        ok = await _post_punishment_card(_PanelCtx(interaction), "voicemute", member, reason, duration=delta)
+        if ok:
+            await interaction.followup.send(f"✅ Voice mute applied to {member.mention}.", ephemeral=True)
+
+
+class PanelWarnModal(discord.ui.Modal, title="Warn Member"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    reason_input = discord.ui.TextInput(
+        label="Reason", style=discord.TextStyle.paragraph, required=False, max_length=400
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+
+        reason = self.reason_input.value or "No reason provided"
+        ctx = _PanelCtx(interaction)
+
+        count = _add_warning(member.id)
+        await _apply_warn_consequences(member, count, moderator, reason)
+
+        card_note = f"**({count}/{MAX_WARNS_BEFORE_BAN})**"
+        is_warn_3 = count >= MAX_WARNS_BEFORE_BAN
+        if is_warn_3:
+            _clear_warnings(member.id)
+            card_note = f"**({MAX_WARNS_BEFORE_BAN}/{MAX_WARNS_BEFORE_BAN})**"
+
+        ok = await _post_punishment_card(
+            ctx, "warn", member, reason, extra_note=card_note, finish_command=not is_warn_3
+        )
+
+        if is_warn_3:
+            bot_member = interaction.guild.me
+            warn3_reason = "3 warn"
+            await _post_punishment_card(
+                ctx, "chatmute", member, warn3_reason, duration=WARN_3_MUTE_DURATION,
+                punisher=bot_member, finish_command=False,
+            )
+            await _post_punishment_card(
+                ctx, "voicemute", member, warn3_reason, duration=WARN_3_MUTE_DURATION,
+                punisher=bot_member, finish_command=True,
+            )
+
+        if ok:
+            await interaction.followup.send(
+                f"✅ Warn applied to {member.mention} ({count}/{MAX_WARNS_BEFORE_BAN}).", ephemeral=True
+            )
+
+
+class PanelWarningsModal(discord.ui.Modal, title="Check Warnings"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.response.send_message("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+        count = _get_warning_count(member.id)
+        await interaction.response.send_message(
+            f"{member.mention} has **{count}/{MAX_WARNS_BEFORE_BAN}** warning(s).", ephemeral=True
+        )
+
+
+class PanelClearWarnModal(discord.ui.Modal, title="Clear Warnings"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    amount_input = discord.ui.TextInput(
+        label="Amount ('all' or a number)", required=False, max_length=10, placeholder="all"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+        if member.bot:
+            return await interaction.followup.send("Bots cannot have warnings.", ephemeral=True)
+
+        current = _get_warning_count(member.id)
+        if current == 0:
+            return await interaction.followup.send(f"{member.mention} has no warnings.", ephemeral=True)
+
+        token = (self.amount_input.value or "all").strip().lower()
+        if token == "all":
+            _clear_warnings(member.id)
+            remaining = 0
+            msg = f"All warnings cleared for {member.mention} (was **{current}/{MAX_WARNS_BEFORE_BAN}**)."
+        else:
+            try:
+                remove_count = int(token)
+            except ValueError:
+                return await interaction.followup.send("Amount must be `all` or a number.", ephemeral=True)
+            if remove_count <= 0:
+                return await interaction.followup.send("Amount must be at least 1.", ephemeral=True)
+            for _ in range(min(remove_count, current)):
+                _remove_warning(member.id)
+            remaining = _get_warning_count(member.id)
+            msg = (
+                f"Removed **{min(remove_count, current)}** warning(s) from {member.mention}. "
+                f"Now **{remaining}/{MAX_WARNS_BEFORE_BAN}**."
+            )
+
+        try:
+            await _sync_warn_roles_after_count(member, remaining, interaction.user, reason="Warnings cleared")
+        except Exception as exc:
+            print(f"Panel clearwarn role sync failed for {member.id}: {exc}")
+            msg += "\n⚠️ Counter updated, but some roles/mutes could not be removed."
+
+        await interaction.followup.send(f"✅ {msg}", ephemeral=True)
+
+
+class PanelUntimeoutModal(discord.ui.Modal, title="Remove Chat Mute"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    reason_input = discord.ui.TextInput(label="Reason", required=False, max_length=200)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not moderator.guild_permissions.moderate_members:
+            return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if not _is_chat_muted(member):
+            return await interaction.followup.send(f"{member.mention} is not chat-muted.", ephemeral=True)
+
+        reason = self.reason_input.value or "Chat mute removed"
+        try:
+            await _remove_chat_mute(member, moderator, reason=reason)
+        except discord.Forbidden:
+            return await interaction.followup.send("I cannot remove chat mute (check **Manage Roles** / hierarchy).", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Untimeout failed: {exc.text}", ephemeral=True)
+
+        await interaction.followup.send(f"✅ Chat mute removed for {member.mention}.", ephemeral=True)
+
+
+class PanelUnmuteModal(discord.ui.Modal, title="Remove Voice Mute"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    reason_input = discord.ui.TextInput(label="Reason", required=False, max_length=200)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = _resolve_member_input(interaction.guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+
+        moderator = interaction.user
+        if not moderator.guild_permissions.moderate_members:
+            return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
+        if not _can_punish_target(moderator, member):
+            return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if not _is_voice_muted(member):
+            return await interaction.followup.send(f"{member.mention} is not voice-muted.", ephemeral=True)
+
+        reason = self.reason_input.value or "Voice mute removed"
+        try:
+            await _remove_voice_mute(member, moderator, reason=reason)
+        except discord.Forbidden:
+            return await interaction.followup.send("I cannot remove voice mute (check **Manage Roles** / hierarchy).", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Unmute failed: {exc.text}", ephemeral=True)
+
+        await interaction.followup.send(f"✅ Voice mute removed for {member.mention}.", ephemeral=True)
+
+
+class PunishmentPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _gate(self, interaction: discord.Interaction) -> bool:
+        if not isinstance(interaction.user, discord.Member) or not _is_punishment_staff(interaction.user):
+            await interaction.response.send_message(
+                "You need staff permissions to use punishment commands.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Ban", emoji="🔨", style=discord.ButtonStyle.danger, custom_id="legends_panel:ban", row=0)
+    async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelBanModal())
+
+    @discord.ui.button(label="Timeout", emoji="⏱️", style=discord.ButtonStyle.secondary, custom_id="legends_panel:timeout", row=0)
+    async def timeout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelTimeoutModal())
+
+    @discord.ui.button(label="Chat Mute", emoji="🔇", style=discord.ButtonStyle.secondary, custom_id="legends_panel:chatmute", row=0)
+    async def chatmute_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelChatMuteModal())
+
+    @discord.ui.button(label="Voice Mute", emoji="🔈", style=discord.ButtonStyle.secondary, custom_id="legends_panel:voicemute", row=0)
+    async def voicemute_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelVoiceMuteModal())
+
+    @discord.ui.button(label="Warn", emoji="⚠️", style=discord.ButtonStyle.primary, custom_id="legends_panel:warn", row=0)
+    async def warn_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelWarnModal())
+
+    @discord.ui.button(label="Warnings", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="legends_panel:warnings", row=1)
+    async def warnings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelWarningsModal())
+
+    @discord.ui.button(label="Clear Warn", emoji="🧹", style=discord.ButtonStyle.secondary, custom_id="legends_panel:clearwarn", row=1)
+    async def clearwarn_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelClearWarnModal())
+
+    @discord.ui.button(label="Untimeout", emoji="🔓", style=discord.ButtonStyle.success, custom_id="legends_panel:untimeout", row=1)
+    async def untimeout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelUntimeoutModal())
+
+    @discord.ui.button(label="Unmute", emoji="🔊", style=discord.ButtonStyle.success, custom_id="legends_panel:unmute", row=1)
+    async def unmute_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._gate(interaction):
+            await interaction.response.send_modal(PanelUnmuteModal())
+
+
+def _build_punishment_panel_embed() -> discord.Embed:
+    return discord.Embed(
+        title="🛡️ Punishment Panel",
+        description=(
+            "Staff only. Click a button, type the member's **ID or @mention** "
+            "and a reason — no need to remember the `?` commands.\n\n"
+            "🔨 **Ban** · ⏱️ **Timeout** · 🔇 **Chat Mute** · 🔈 **Voice Mute** · ⚠️ **Warn**\n"
+            "📋 **Warnings** (check count) · 🧹 **Clear Warn** · 🔓 **Untimeout** · 🔊 **Unmute**"
+        ),
+        color=discord.Color.from_rgb(88, 101, 242),
+    ).set_footer(text="Legends Tunisia — Punishment Panel")
+
+
+@bot.command(name="punishmentpanel", aliases=["modpanel", "ppanel"])
+@commands.has_permissions(manage_guild=True)
+async def punishment_panel_cmd(ctx):
+    """Post the punishment panel (Ban/Timeout/Mute/Warn buttons) — admin only."""
+    await ctx.send(embed=_build_punishment_panel_embed(), view=PunishmentPanelView())
     try:
         await ctx.message.delete()
     except discord.Forbidden:
