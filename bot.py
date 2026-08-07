@@ -132,7 +132,6 @@ VOICE_LEVEL_SKIP_CHANNEL_IDS = frozenset({
     BOT_VOICE_CHANNEL_ID,
 })
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
-BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "")
 BOT_BUILD_ID = "2026-07-08-rate-limit-safe"
 
 LEVEL_LOG_CHANNEL_ID = 1517921554510385242
@@ -270,6 +269,8 @@ async def _api_call_with_retry(coro_factory, *, label: str, attempts: int = 3):
 owners = {}
 room_kinds = {}
 room_nsfw_enabled: dict[int, bool] = {}
+room_nsfw_pending: dict[int, tuple[str, bool]] = {}
+room_nsfw_retry_tasks: dict[int, asyncio.Task] = {}
 owner_transfer_tasks = {}
 OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
@@ -299,14 +300,13 @@ active_giveaways: dict[int, asyncio.Event] = {}
 chat_mute_expiry_tasks: dict[int, asyncio.Task] = {}
 current_giveaway_view = None
 
-LOUNGE_ROOM_EMOJIS = ["🎙️", "🎧", "🔊", "🎵", "🎮", "💬", "🌟", "🔥", "🎉", "✨"]
+LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
 LOUNGE_ROOM_NAME_SUFFIX = " ✓"
 NSFW_ROOM_NAME_PREFIX = "🔞"
 
 
 def format_lounge_room_name(member_name: str) -> str:
-    emoji = random.choice(LOUNGE_ROOM_EMOJIS)
-    return f"{emoji}|{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
+    return f"{LOUNGE_ROOM_NAME_PREFIX}{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
 
 
 JOIN_TO_CREATE_CHANNELS = {
@@ -601,15 +601,53 @@ async def _apply_nsfw_room_mark(
     room_nsfw_enabled[channel.id] = enabled
 
 
+async def _schedule_nsfw_room_retry(
+    guild_id: int,
+    channel_id: int,
+    new_name: str,
+    enabled: bool,
+    delay: float,
+) -> None:
+    existing = room_nsfw_retry_tasks.pop(channel_id, None)
+    if existing and not existing.done():
+        existing.cancel()
+
+    room_nsfw_pending[channel_id] = (new_name, enabled)
+
+    async def _retry() -> None:
+        try:
+            await asyncio.sleep(max(delay, 1))
+            pending = room_nsfw_pending.get(channel_id)
+            if pending != (new_name, enabled):
+                return
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                return
+            fresh = await guild.fetch_channel(channel_id)
+            if not isinstance(fresh, discord.VoiceChannel):
+                return
+            await _apply_nsfw_room_mark(
+                fresh,
+                new_name=new_name,
+                enabled=enabled,
+                reason="Room 18+ label retry",
+            )
+            room_nsfw_pending.pop(channel_id, None)
+            print(f"NSFW label retry ok for channel {channel_id}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"NSFW label retry failed for {channel_id}: {exc}")
+        finally:
+            room_nsfw_retry_tasks.pop(channel_id, None)
+
+    room_nsfw_retry_tasks[channel_id] = asyncio.create_task(_retry())
+
+
 async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, str, float | None]:
     """Toggle 🔞 prefix on the voice channel name.
 
     Returns (enabled, display_name, retry_after_seconds if rate-limited else None).
-    On rate-limit, nothing is scheduled to happen later — the label only ever
-    changes when the owner presses the button and Discord accepts the rename
-    right then. (Previously this queued a background retry that could rename
-    the room automatically minutes later with no further input from the
-    owner, which looked like the label randomly flipping on its own.)
     """
     fresh = await channel.guild.fetch_channel(channel.id)
     if not isinstance(fresh, discord.VoiceChannel):
@@ -619,6 +657,12 @@ async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, s
     enabled = not has_label
     base_name = _strip_nsfw_room_prefix(fresh.name)
     new_name = f"{NSFW_ROOM_NAME_PREFIX}{base_name}"[:100] if enabled else base_name[:100]
+
+    pending = room_nsfw_pending.pop(fresh.id, None)
+    if pending:
+        retry_task = room_nsfw_retry_tasks.pop(fresh.id, None)
+        if retry_task and not retry_task.done():
+            retry_task.cancel()
 
     if fresh.name == new_name:
         room_nsfw_enabled[fresh.id] = enabled
@@ -636,7 +680,14 @@ async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, s
         if exc.status != 429:
             raise
         retry_after = float(getattr(exc, "retry_after", 0) or 600)
-        return has_label, fresh.name, retry_after
+        await _schedule_nsfw_room_retry(
+            channel.guild.id,
+            fresh.id,
+            new_name,
+            enabled,
+            retry_after + 1,
+        )
+        return enabled, new_name, retry_after
 
 
 PANEL_EMOJI_LOCK = discord.PartialEmoji(name="50376", id=1518983212066668675)
@@ -1339,24 +1390,19 @@ async def _close_text_ticket(
                 color=discord.Color.red(),
             )
         )
-    except discord.HTTPException as exc:
-        print(f"Ticket close notice failed: {exc}")
-
-    # Confirm to the closer BEFORE deleting the channel — an ephemeral followup
-    # sent after the channel is gone fails with "Unknown Channel" (10003) and
-    # crashes this callback (that was the bug: the button looked broken/errored
-    # every time, even though the channel itself got deleted fine).
-    try:
-        await interaction.followup.send("Ticket closed.", ephemeral=True)
-    except discord.HTTPException as exc:
-        print(f"Ticket close confirmation failed: {exc}")
-
-    try:
         await channel.delete(reason=f"Ticket closed by {closer}: {reason}")
     except discord.Forbidden:
-        print(f"Cannot delete ticket channel {channel.id}: missing Manage Channels permission")
+        return await interaction.followup.send(
+            "I cannot delete this ticket channel.",
+            ephemeral=True,
+        )
     except discord.HTTPException as exc:
-        print(f"Could not delete ticket channel {channel.id}: {exc.text}")
+        return await interaction.followup.send(
+            f"Could not close the ticket. ({exc.text})",
+            ephemeral=True,
+        )
+
+    await interaction.followup.send("Ticket closed.", ephemeral=True)
 
 
 async def _log_ticket_setup(guild: discord.Guild):
@@ -1501,73 +1547,6 @@ class TransferOwnerView(discord.ui.View):
         self.add_item(TransferOwnerSelect(channel, owner_id))
 
 
-class KickSelect(discord.ui.Select):
-    def __init__(self, channel, owner_id: int):
-        self.channel = channel
-        self.owner_id = owner_id
-        options = [
-            discord.SelectOption(label=member.display_name, value=str(member.id), emoji="👞")
-            for member in channel.members
-            if not member.bot and member.id != owner_id
-        ]
-        if not options:
-            options = [
-                discord.SelectOption(label="No other members in the room", value="none", disabled=True)
-            ]
-
-        super().__init__(
-            placeholder="Select who to disconnect...",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "none":
-            return await interaction.response.send_message(
-                "There is no one else in the room to kick.",
-                ephemeral=True,
-            )
-
-        if interaction.user.id != owners.get(self.channel.id):
-            return await interaction.response.send_message(
-                "Only the room owner can kick members.",
-                ephemeral=True,
-            )
-
-        member_id = int(self.values[0])
-        target = interaction.guild.get_member(member_id)
-        if not target or not target.voice or not target.voice.channel or target.voice.channel.id != self.channel.id:
-            return await interaction.response.send_message(
-                "That user is no longer in your room.",
-                ephemeral=True,
-            )
-
-        try:
-            await target.move_to(None, reason=f"Kicked from room by {interaction.user}")
-        except discord.Forbidden:
-            return await interaction.response.send_message(
-                "I do not have permission to disconnect that member (check **Move Members**).",
-                ephemeral=True,
-            )
-        except discord.HTTPException as exc:
-            return await interaction.response.send_message(
-                f"Could not disconnect that member. ({exc.text})",
-                ephemeral=True,
-            )
-
-        await interaction.response.send_message(
-            f"Disconnected **{target.display_name}** from the room.",
-            ephemeral=True,
-        )
-
-
-class KickView(discord.ui.View):
-    def __init__(self, channel, owner_id: int):
-        super().__init__(timeout=60)
-        self.add_item(KickSelect(channel, owner_id))
-
-
 class RenameModal(discord.ui.Modal, title="Change Room Name"):
     channel_name = discord.ui.TextInput(label="New Room Name", placeholder="Enter channel name...", max_length=30, required=True)
 
@@ -1576,16 +1555,8 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
         self.channel = channel
 
     async def on_submit(self, interaction: discord.Interaction):
-        fresh = interaction.guild.get_channel(self.channel.id) or self.channel
-        # Keep the 🔞 label through a rename instead of silently dropping it —
-        # a plain text rename shouldn't undo the owner's 18+ toggle.
-        new_name = self.channel_name.value
-        if _channel_has_nsfw_label(fresh.name):
-            new_name = f"{NSFW_ROOM_NAME_PREFIX}{new_name}"
-        new_name = new_name[:100]
-
-        await self.channel.edit(name=new_name)
-        await interaction.response.send_message(f"Room name updated to: **{new_name}**", ephemeral=True)
+        await self.channel.edit(name=self.channel_name.value)
+        await interaction.response.send_message(f"Room name updated to: **{self.channel_name.value}**", ephemeral=True)
 
 
 class ControlPanelView(discord.ui.View):
@@ -1704,9 +1675,7 @@ class ControlPanelView(discord.ui.View):
             return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
-        await interaction.response.send_message(
-            "Choose who to disconnect:", view=KickView(channel, interaction.user.id), ephemeral=True
-        )
+        await interaction.response.send_message("Choose who to disconnect:", view=KickView(channel), ephemeral=True)
 
     async def transfer_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
@@ -1759,9 +1728,10 @@ class ControlPanelView(discord.ui.View):
 
         if retry_after is not None:
             mins = max(1, int((retry_after + 59) // 60))
+            action = "ytetzad" if enabled else "yetsala7"
             return await interaction.followup.send(
-                f"⏳ Discord y7eb limit esm el room (2 marrat / 10 min) — **ma tbadletch el label.**\n"
-                f"Stanna ~**{mins} min** w 3awed clicki 3al bouton bech tbadelha (ma yetbadelch b rasso).",
+                f"⏳ Discord y7eb limit esm el room (2 marrat / 10 min).\n"
+                f"🔞 Label **{action}** automatiquement ba3d ~**{mins} min**. Ma tclickich kter.",
                 ephemeral=True,
             )
 
@@ -1946,9 +1916,7 @@ _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
     name = _strip_nsfw_room_prefix(channel_name)
-    if name.endswith(LOUNGE_ROOM_NAME_SUFFIX) and any(
-        name.startswith(f"{emoji}|") for emoji in LOUNGE_ROOM_EMOJIS
-    ):
+    if name.startswith(LOUNGE_ROOM_NAME_PREFIX) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
         return "lounge"
     if name.endswith("'s Lounge"):
         return "lounge"
@@ -1968,6 +1936,10 @@ def _clear_temp_room_tracking(channel_id: int):
     owners.pop(channel_id, None)
     room_kinds.pop(channel_id, None)
     room_nsfw_enabled.pop(channel_id, None)
+    room_nsfw_pending.pop(channel_id, None)
+    retry_task = room_nsfw_retry_tasks.pop(channel_id, None)
+    if retry_task and not retry_task.done():
+        retry_task.cancel()
     locked_rooms.discard(channel_id)
 
 
