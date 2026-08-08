@@ -3123,14 +3123,16 @@ async def set_notifications_cmd(ctx):
         pass
 
 
-@bot.command(name="postroles")
-@commands.has_permissions(manage_guild=True)
-async def post_roles_cmd(ctx):
-    """Post the game role picker menu (admin only)."""
+@bot.tree.command(name="postroles", description="Post the game role picker menu (admin only)")
+async def slash_postroles(interaction: discord.Interaction):
+    if not await _slash_manage_guild_gate(interaction):
+        return
+
     active = _active_game_roles()
     if not active:
-        return await ctx.send(
-            "No game roles configured. Edit **GAME_ROLES** in `bot.py` and set real `role_id` values."
+        return await interaction.response.send_message(
+            "No game roles configured. Edit **GAME_ROLES** in `bot.py` and set real `role_id` values.",
+            ephemeral=True,
         )
 
     lines = "\n".join(f"{g.get('emoji', '🎮')} @{g['label']}" for g in active)
@@ -3143,11 +3145,8 @@ async def post_roles_cmd(ctx):
         ),
         color=discord.Color.purple(),
     )
-    await ctx.send(embed=embed, view=GameRolePickerView())
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
+    await interaction.channel.send(embed=embed, view=GameRolePickerView())
+    await interaction.response.send_message("✅ Role picker posted.", ephemeral=True)
 
 
 @bot.command(name="syncroles", aliases=["syncjoinroles"])
@@ -3263,13 +3262,23 @@ async def sync_roles_cmd(ctx, member: discord.Member = None):
     await status.edit(content="\n".join(lines))
 
 
-@bot.command(name="ticketpanel", aliases=["go"])
-@commands.has_permissions(manage_guild=True)
-async def ticket_panel_cmd(ctx):
-    """Post the text ticket panel (admin only). Alias: !go"""
-    target = ctx.channel
+async def _slash_manage_guild_gate(interaction: discord.Interaction) -> bool:
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "You need **Manage Server** permission to use this.", ephemeral=True
+        )
+        return False
+    return True
+
+
+@bot.tree.command(name="ticketpanel", description="Post the support ticket panel (admin only)")
+async def slash_ticketpanel(interaction: discord.Interaction):
+    if not await _slash_manage_guild_gate(interaction):
+        return
+
+    target = interaction.channel
     if TICKET_PANEL_CHANNEL_ID:
-        panel_channel = ctx.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
+        panel_channel = interaction.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
         if panel_channel:
             target = panel_channel
 
@@ -3283,12 +3292,7 @@ async def ticket_panel_cmd(ctx):
     )
     embed.set_image(url="https://i.imgur.com/07cNK6S.png")
     await target.send(embed=embed, view=TicketPanelView())
-    if target.id != ctx.channel.id:
-        await ctx.send(f"Ticket panel posted in {target.mention}.", delete_after=8)
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
+    await interaction.response.send_message(f"✅ Ticket panel posted in {target.mention}.", ephemeral=True)
 
 
 @bot.command(name="closeticket", aliases=["cv"])
@@ -4551,15 +4555,12 @@ def _build_punishment_panel_embed() -> discord.Embed:
     ).set_footer(text="Legends Tunisia — Punishment Panel")
 
 
-@bot.command(name="punishmentpanel", aliases=["modpanel", "ppanel"])
-@commands.has_permissions(manage_guild=True)
-async def punishment_panel_cmd(ctx):
-    """Post the punishment panel (Ban/Timeout/Mute/Warn buttons) — admin only."""
-    await ctx.send(embed=_build_punishment_panel_embed(), view=PunishmentPanelView())
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
+@bot.tree.command(name="punishmentpanel", description="Post the punishment panel (Ban/Timeout/Mute/Warn buttons)")
+async def slash_punishmentpanel(interaction: discord.Interaction):
+    if not await _slash_manage_guild_gate(interaction):
+        return
+    await interaction.channel.send(embed=_build_punishment_panel_embed(), view=PunishmentPanelView())
+    await interaction.response.send_message("✅ Punishment panel posted.", ephemeral=True)
 
 
 @bot.command(name="testpunishment", aliases=["testpunish"])

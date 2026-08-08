@@ -56,9 +56,10 @@
 | `?checkjoincreate` | — | Vérifie hubs, permissions bot, catégories join-to-create. |
 | `?checkticketcategory` | — | Vérifie la catégorie tickets. |
 | `?setnotifications` | `?mentionsonly`, `?notifmentions` | Notifications serveur → @mentions only. |
-| `?postroles` | — | Poste le menu sélection rôles jeux. |
+| `/postroles` | — | Poste le menu sélection rôles jeux. (slash uniquement) |
 | `?syncroles` | `?syncjoinroles` | Donne les 5 rôles join aux membres (`?syncroles` ou `?syncroles @user`). |
-| `?ticketpanel` | `?go` | Poste le panneau tickets (Support / Report / Bugs). |
+| `/ticketpanel` | — | Poste le panneau tickets (Support / Report / Bugs). (slash uniquement) |
+| `/punishmentpanel` | — | Poste le panel punishment (Ban/Timeout/Mute/Warn/...). (slash uniquement) |
 
 ---
 
@@ -137,7 +138,7 @@ Types punishment : `ban`, `timeout`, `chatmute`, `voicemute`, `warn`
 
 ---
 
-## Menu rôles jeux (après `?postroles`)
+## Menu rôles jeux (après `/postroles`)
 
 Jeux configurés : Free Fire, Rust, COD, GTA V, Brawlhalla, CS GO, Fortnite, Valorant, LoL, Minecraft.
 
@@ -234,9 +235,7 @@ Version réduite (Pydroid) : join-to-create lounge + `!level` simplifié. Pas de
 ?checkticketcategory
 ?testwelcome
 ?setnotifications | ?mentionsonly | ?notifmentions
-?postroles
 ?syncroles | ?syncjoinroles
-?ticketpanel | ?go
 ?closeticket | ?cv
 ?post | ?say | ?echo
 ?giveaway
@@ -253,6 +252,8 @@ Version réduite (Pydroid) : join-to-create lounge + `!level` simplifié. Pas de
 ?clearwarn | ?removewarn | ?unwarn | ?clearwarnings
 ?testpunishment | ?testpunish
 ```
+
+Panels — slash uniquement (pas de version `?`): `/postroles`, `/ticketpanel`, `/punishmentpanel`.
 
 ---
 
