@@ -60,6 +60,7 @@
 | `?syncroles` | `?syncjoinroles` | Donne les 5 rôles join aux membres (`?syncroles` ou `?syncroles @user`). |
 | `/ticketpanel` | — | Poste le panneau tickets (Support / Report / Bugs). (slash uniquement) |
 | `/punishmentpanel` | — | Poste le panel punishment (Ban/Timeout/Mute/Warn/...). (slash uniquement) |
+| `/adminpanel` | — | Poste l'admin panel (diagnostics/syncroles/giveaway/testwelcome/testpunishment en boutons). (slash uniquement) |
 
 ---
 
@@ -96,21 +97,21 @@ Boutons giveaway : **Join Giveaway**, **Chkoun Charek**.
 
 **Staff** = rôle Staff **ou** Manage Server / Moderate Members / Ban Members
 
-Slash uniquement (pas de version `?`) — plus le [punishment panel](#) (boutons/modals, `/punishmentpanel`).
+Panel-only — pas de commande `?ban`/`?timeout`/etc. Tout passe par le [punishment panel](#) (`/punishmentpanel`, slash) : un bouton par action, modal pour l'ID/mention + raison.
 
-| Commande | Description |
-|----------|-------------|
-| `/ban` | Ban + carte punishment. |
-| `/timeout` | Timeout Discord (max 28j). |
-| `/chatmute` | Chat mute (rôle + timeout + suppression auto messages). |
-| `/voicemute` | Voice mute (rôle + server mute en vocal). |
-| `/untimeout` | Retire chat mute. |
-| `/unmute` | Retire voice mute. |
-| `/warn` | Avertissement + rôles auto. |
-| `/warnings` | Compteur warnings. |
-| `/clearwarn` | Efface warnings (`amount`: `all` ou un nombre) + sync rôles/mutes. |
+| Bouton | Action |
+|--------|--------|
+| 🔨 **Ban** | Ban + carte punishment. |
+| ⏱️ **Timeout** | Timeout Discord (max 28j). |
+| 🔇 **Chat Mute** | Chat mute (rôle + timeout + suppression auto messages). |
+| 🔈 **Voice Mute** | Voice mute (rôle + server mute en vocal). |
+| ⚠️ **Warn** | Avertissement + rôles auto. |
+| 📋 **Warnings** | Compteur warnings. |
+| 🧹 **Clear Warn** | Efface warnings (`all` ou un nombre) + sync rôles/mutes. |
+| 🔓 **Untimeout** | Retire chat mute. |
+| 🔊 **Unmute** | Retire voice mute. |
 
-### Système `/warn` (3 warns)
+### Système warn (3 warns)
 
 | Warn | Action |
 |------|--------|
@@ -119,13 +120,33 @@ Slash uniquement (pas de version `?`) — plus le [punishment panel](#) (boutons
 | **3** | Retire Warn 1+2, chat mute 1j + voice mute, compteur → 0 |
 | **4e warn** | Recommence à 1 |
 
-### `/clearwarn` — sync rôles
+### Clear Warn — sync rôles
 
 | Après clear | Rôles retirés |
 |-------------|---------------|
 | **0/3** | Warn 1 + Warn 2 + chat mute + voice mute |
 | **1/3** | Warn 2 seulement |
 | **2/3** | Aucun rôle en plus |
+
+---
+
+## Admin Panel (`/adminpanel`)
+
+**Manage Server** requis pour poster le panel et pour la plupart des boutons (Giveaway = rôle Giveaway Admin, Test Punishment = Staff punishment). Chaque bouton appelle exactement la même commande que sa version `?` — même comportement, juste un member picker/modal au lieu de taper la commande.
+
+| Bouton | Équivaut à |
+|--------|-----------|
+| 🔍 **Check Join/Create** | `?checkjoincreate` |
+| 🎫 **Check Ticket Category** | `?checkticketcategory` |
+| 🔔 **Set Notifications** | `?setnotifications` |
+| 🔄 **Sync Roles** | `?syncroles` (modal : membre optionnel) |
+| 👋 **Test Welcome** | `?testwelcome` (modal : membre optionnel) |
+| 🎁 **Start Giveaway** | `?giveaway` (lance le même flow par DM) |
+| 🛑 **Stop Giveaway** | `?stop` |
+| 🚫 **Kick (Giveaway)** | `?kickuser` (modal : membre) |
+| 🧪 **Test Punishment** | `?testpunishment` (modal : type/membre/raison) |
+
+Pas dans le panel : `?ping`/`?level` (public, tout le monde), `?panel`/`?clear` (room vocale — self-service owner, déjà son propre panel), `?post` (attachments — un modal Discord ne peut pas recevoir de fichier), `?closeticket` (déjà un bouton Close dédié dans chaque ticket).
 
 ---
 
@@ -247,8 +268,10 @@ Version réduite (Pydroid) : join-to-create lounge + `!level` simplifié. Pas de
 ```
 
 Slash uniquement (pas de version `?`):
-- Panels : `/postroles`, `/ticketpanel`, `/punishmentpanel`
-- Punishment : `/ban`, `/timeout`, `/chatmute`, `/voicemute`, `/warn`, `/warnings`, `/clearwarn`, `/untimeout`, `/unmute`
+- `/postroles`, `/ticketpanel`, `/punishmentpanel` — postent chacun leur panel.
+- `/adminpanel` — panel admin (checkjoincreate/checkticketcategory/setnotifications/syncroles/testwelcome/giveaway/stop/kickuser/testpunishment en boutons).
+
+Punishment (ban/timeout/mute/warn/...) : boutons du `/punishmentpanel` uniquement, pas de commande texte.
 
 ---
 
