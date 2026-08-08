@@ -85,7 +85,7 @@ GIVEAWAY_CHANNEL_ID = 1518721917312434197
 GIVEAWAY_ADMIN_ROLE_ID = 1511828976732209252
 BAN_TIMEOUT_IMMUNE_ROLE_IDS = [GIVEAWAY_ADMIN_ROLE_ID]
 
-TICKET_PANEL_CHANNEL_ID = 1522527871887998987
+TICKET_PANEL_CHANNEL_ID = 1534182107310719037
 TICKET_LOG_CHANNEL_ID = 1522527871887998987
 TICKET_CATEGORY_ID = 1523436013337448638
 _env_ticket_cat = os.getenv("TICKET_CATEGORY_ID", "").strip()
@@ -300,13 +300,17 @@ active_giveaways: dict[int, asyncio.Event] = {}
 chat_mute_expiry_tasks: dict[int, asyncio.Task] = {}
 current_giveaway_view = None
 
+LOUNGE_ROOM_EMOJIS = [
+    "🎙️", "🍘", "🍡", "⚡", "🌪️", "🍁", "🎃", "🍩", "🍫", "🌹", "🍧", "🍜", "🍛", "🍝", "🗽",
+]
 LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
 LOUNGE_ROOM_NAME_SUFFIX = " ✓"
 NSFW_ROOM_NAME_PREFIX = "🔞"
 
 
 def format_lounge_room_name(member_name: str) -> str:
-    return f"{LOUNGE_ROOM_NAME_PREFIX}{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
+    emoji = random.choice(LOUNGE_ROOM_EMOJIS)
+    return f"{emoji}|{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
 
 
 JOIN_TO_CREATE_CHANNELS = {
@@ -1916,7 +1920,7 @@ _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
     name = _strip_nsfw_room_prefix(channel_name)
-    if name.startswith(LOUNGE_ROOM_NAME_PREFIX) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
+    if any(name.startswith(f"{emoji}|") for emoji in LOUNGE_ROOM_EMOJIS) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
         return "lounge"
     if name.endswith("'s Lounge"):
         return "lounge"
