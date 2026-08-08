@@ -96,19 +96,21 @@ Boutons giveaway : **Join Giveaway**, **Chkoun Charek**.
 
 **Staff** = rôle Staff **ou** Manage Server / Moderate Members / Ban Members
 
-| Commande | Aliases | Usage | Description |
-|----------|---------|-------|-------------|
-| `?ban` | — | `?ban @user raison` | Ban + carte punishment. |
-| `?timeout` | `?to` | `?timeout @user 1h raison` | Timeout Discord (max 28j). |
-| `?chatmute` | `?cmute` | `?chatmute @user 30m raison` | Chat mute (rôle + timeout + suppression auto messages). |
-| `?voicemute` | `?vmute` | `?voicemute @user 1h raison` | Voice mute (rôle + server mute en vocal). |
-| `?untimeout` | `?unchatmute`, `?unmutechat` | `?untimeout @user` | Retire chat mute. |
-| `?unmute` | `?unvmute`, `?unvoicemute` | `?unmute @user` | Retire voice mute. |
-| `?warn` | `?warning` | `?warn @user raison` | Avertissement + rôles auto. |
-| `?warnings` | `?warns`, `?getwarns` | `?warnings @user` | Compteur warnings. |
-| `?clearwarn` | `?removewarn`, `?unwarn`, `?clearwarnings` | `?clearwarn @user` / `?clearwarn @user 1` | Efface warnings + sync rôles/mutes. |
+Slash uniquement (pas de version `?`) — plus le [punishment panel](#) (boutons/modals, `/punishmentpanel`).
 
-### Système `?warn` (3 warns)
+| Commande | Description |
+|----------|-------------|
+| `/ban` | Ban + carte punishment. |
+| `/timeout` | Timeout Discord (max 28j). |
+| `/chatmute` | Chat mute (rôle + timeout + suppression auto messages). |
+| `/voicemute` | Voice mute (rôle + server mute en vocal). |
+| `/untimeout` | Retire chat mute. |
+| `/unmute` | Retire voice mute. |
+| `/warn` | Avertissement + rôles auto. |
+| `/warnings` | Compteur warnings. |
+| `/clearwarn` | Efface warnings (`amount`: `all` ou un nombre) + sync rôles/mutes. |
+
+### Système `/warn` (3 warns)
 
 | Warn | Action |
 |------|--------|
@@ -117,7 +119,7 @@ Boutons giveaway : **Join Giveaway**, **Chkoun Charek**.
 | **3** | Retire Warn 1+2, chat mute 1j + voice mute, compteur → 0 |
 | **4e warn** | Recommence à 1 |
 
-### `?clearwarn` — sync rôles
+### `/clearwarn` — sync rôles
 
 | Après clear | Rôles retirés |
 |-------------|---------------|
@@ -241,19 +243,12 @@ Version réduite (Pydroid) : join-to-create lounge + `!level` simplifié. Pas de
 ?giveaway
 ?stop
 ?kickuser
-?ban
-?timeout | ?to
-?chatmute | ?cmute
-?voicemute | ?vmute
-?untimeout | ?unchatmute | ?unmutechat
-?unmute | ?unvmute | ?unvoicemute
-?warn | ?warning
-?warnings | ?warns | ?getwarns
-?clearwarn | ?removewarn | ?unwarn | ?clearwarnings
 ?testpunishment | ?testpunish
 ```
 
-Panels — slash uniquement (pas de version `?`): `/postroles`, `/ticketpanel`, `/punishmentpanel`.
+Slash uniquement (pas de version `?`):
+- Panels : `/postroles`, `/ticketpanel`, `/punishmentpanel`
+- Punishment : `/ban`, `/timeout`, `/chatmute`, `/voicemute`, `/warn`, `/warnings`, `/clearwarn`, `/untimeout`, `/unmute`
 
 ---
 
