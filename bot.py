@@ -456,9 +456,9 @@ async def _create_join_to_create_room(member, trigger_channel):
         )
 
         if config["kind"] == "lounge":
-            channel_name = format_lounge_room_name(member.name)
+            channel_name = format_lounge_room_name(member.display_name)
         else:
-            channel_name = config["name"].format(member=member.name)
+            channel_name = config["name"].format(member=member.display_name)
 
         new_channel = await guild.create_voice_channel(
             name=channel_name[:100],
