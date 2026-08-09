@@ -323,16 +323,6 @@ JOIN_TO_CREATE_CHANNELS = {
         "title": "SUPPORT ROOM",
         "kind": "support",
     },
-    VERIFICATION_1_ID: {
-        "name": "Verify | {member}",
-        "title": "VERIFICATION ROOM",
-        "kind": "verification",
-    },
-    VERIFICATION_2_ID: {
-        "name": "Verify | {member}",
-        "title": "VERIFICATION ROOM",
-        "kind": "verification",
-    },
 }
 
 
@@ -346,8 +336,6 @@ def _log_join_to_create_startup(guild: discord.Guild) -> None:
     labels = {
         CREATE_CHANNEL_ID: "Create Lounge",
         SUPPORT_CHANNEL_ID: "Support",
-        VERIFICATION_1_ID: "Verification 1",
-        VERIFICATION_2_ID: "Verification 2",
     }
     for hub_id, label in labels.items():
         channel = guild.get_channel(hub_id)
@@ -2935,8 +2923,6 @@ async def check_join_create_cmd(ctx):
     hub_labels = {
         CREATE_CHANNEL_ID: "Create Lounge",
         SUPPORT_CHANNEL_ID: "Support",
-        VERIFICATION_1_ID: "Verification 1",
-        VERIFICATION_2_ID: "Verification 2",
     }
     lines.append("**Configured hubs:**")
     for hub_id, label in hub_labels.items():

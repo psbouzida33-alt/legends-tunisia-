@@ -41,7 +41,6 @@
 |-----|----------------|-------|
 | **Create Lounge** | `🎙️\|{username} ✓` | Boy + Girl + owner |
 | **Support** | `Support \| {username}` | Staff + owner |
-| **Verification 1 / 2** | `Verify \| {username}` | Staff + owner |
 
 - Room **supprimée** quand tout le monde quitte.
 - Owner part + autres restent → **60 s** puis transfer aléatoire (lounge).
