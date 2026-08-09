@@ -94,21 +94,25 @@ Boutons giveaway : **Join Giveaway**, **Chkoun Charek**.
 
 ## Modération / Punishment
 
-**Staff** = rôle Staff **ou** Manage Server / Moderate Members / Ban Members
+**Staff** = rôle Staff **ou** Manage Server / Moderate Members / Ban Members — condition pour **voir/ouvrir** le panel.
 
 Panel-only — pas de commande `?ban`/`?timeout`/etc. Tout passe par le [punishment panel](#) (`/punishmentpanel`, slash) : un bouton par action, modal pour l'ID/mention + raison.
 
-| Bouton | Action |
-|--------|--------|
-| 🔨 **Ban** | Ban + carte punishment. |
-| ⏱️ **Timeout** | Timeout Discord (max 28j). |
-| 🔇 **Chat Mute** | Chat mute (rôle + timeout + suppression auto messages). |
-| 🔈 **Voice Mute** | Voice mute (rôle + server mute en vocal). |
-| ⚠️ **Warn** | Avertissement + rôles auto. |
-| 📋 **Warnings** | Compteur warnings. |
-| 🧹 **Clear Warn** | Efface warnings (`all` ou un nombre) + sync rôles/mutes. |
-| 🔓 **Untimeout** | Retire chat mute. |
-| 🔊 **Unmute** | Retire voice mute. |
+⚠️ **Le rôle Staff seul n'est pas suffisant pour tous les boutons.** Une fois le modal ouvert, Ban/Timeout/Chat Mute/Voice Mute/Untimeout/Unmute revérifient une vraie permission Discord (le rôle custom ne compte pas ici) ; seuls Warn/Warnings/Clear Warn se contentent de la condition Staff ci-dessus. C'est voulu : un membre qui n'a que le rôle Staff (sans Manage Server/Moderate Members/Ban Members) peut avertir et consulter/effacer des warnings, mais ne peut pas bannir, timeout ou mute qui que ce soit.
+
+| Bouton | Action | Permission Discord requise (en plus du rôle Staff) |
+|--------|--------|------------------------------------------------------|
+| 🔨 **Ban** | Ban + carte punishment. | Ban Members |
+| ⏱️ **Timeout** | Timeout Discord (max 28j). | Moderate Members |
+| 🔇 **Chat Mute** | Chat mute (rôle + timeout + suppression auto messages). | Moderate Members |
+| 🔈 **Voice Mute** | Voice mute (rôle + server mute en vocal). | Moderate Members |
+| ⚠️ **Warn** | Avertissement + rôles auto. | — (rôle Staff suffit) |
+| 📋 **Warnings** | Compteur warnings. | — (rôle Staff suffit) |
+| 🧹 **Clear Warn** | Efface warnings (`all` ou un nombre) + sync rôles/mutes. | — (rôle Staff suffit) |
+| 🔓 **Untimeout** | Retire chat mute. | Moderate Members |
+| 🔊 **Unmute** | Retire voice mute. | Moderate Members |
+
+Le rôle **Giveaway Admin** est protégé (`_is_ban_timeout_immune`) contre Ban/Timeout/Chat Mute/Voice Mute/Warn — impossible à punir par ces 5 boutons, quel que soit le staff qui essaie.
 
 ### Système warn (3 warns)
 

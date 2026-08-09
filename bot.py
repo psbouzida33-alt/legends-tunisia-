@@ -151,6 +151,20 @@ LEVELS_RESTORE_FROM_DISCORD = os.getenv("LEVELS_RESTORE_FROM_DISCORD", "true").l
     "yes",
 )
 
+# Warnings backup — same Render-safe pattern as levels (local disk is wiped on redeploy).
+WARNINGS_BACKUP_CHANNEL_ID = _env_channel_id(
+    "WARNINGS_BACKUP_CHANNEL_ID", BOT_CHAT_CHANNEL_ID
+)
+WARNINGS_BACKUP_HOURS = max(1.0, float(os.getenv("WARNINGS_BACKUP_HOURS", "1")))
+WARNINGS_BACKUP_MARKER = "LEGENDS_WARNINGS_BACKUP"
+WARNINGS_BACKUP_FILENAME = "warnings_database.json"
+WARNINGS_BACKUP_KEEP = max(1, int(os.getenv("WARNINGS_BACKUP_KEEP", "5")))
+WARNINGS_RESTORE_FROM_DISCORD = os.getenv("WARNINGS_RESTORE_FROM_DISCORD", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 
 def _env_role_id(name: str, default: int = 0) -> int:
     raw = os.getenv(name, "").strip()
@@ -206,6 +220,8 @@ def _start_background_tasks():
         update_voice_levels_task.start()
     if not levels_backup_task.is_running():
         levels_backup_task.start()
+    if not warnings_backup_task.is_running():
+        warnings_backup_task.start()
 
 
 intents = discord.Intents.default()
@@ -285,7 +301,7 @@ ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
 user_levels: dict[int, dict] = {}
-MAX_WARNS_BEFORE_BAN = 3
+MAX_WARNS_BEFORE_MUTE = 3
 
 WARN_1_ROLE_ID = 1523000242491097208
 WARN_2_ROLE_ID = 1523000417758347274
@@ -2118,6 +2134,109 @@ def _save_warnings() -> bool:
         return False
 
 
+def _warnings_payload_bytes() -> bytes:
+    payload = {str(k): v for k, v in user_warnings.items()}
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _get_warnings_backup_channel():
+    channel = bot.get_channel(WARNINGS_BACKUP_CHANNEL_ID)
+    if channel is not None:
+        return channel
+    for guild in bot.guilds:
+        channel = guild.get_channel(WARNINGS_BACKUP_CHANNEL_ID)
+        if channel is not None:
+            return channel
+    return None
+
+
+async def _prune_old_warnings_backups(channel, *, keep: int = WARNINGS_BACKUP_KEEP) -> None:
+    backups = []
+    try:
+        async for message in channel.history(limit=40):
+            if message.author.id != bot.user.id:
+                continue
+            if WARNINGS_BACKUP_MARKER not in (message.content or ""):
+                continue
+            backups.append(message)
+    except discord.HTTPException as exc:
+        print(f"Warnings backup prune scan failed: {exc}")
+        return
+
+    for old in backups[keep:]:
+        try:
+            await old.delete()
+        except discord.HTTPException:
+            pass
+
+
+async def _post_warnings_backup(*, reason: str = "hourly") -> bool:
+    channel = _get_warnings_backup_channel()
+    if channel is None:
+        print(f"Warnings backup skipped: channel {WARNINGS_BACKUP_CHANNEL_ID} not found.")
+        return False
+
+    _save_warnings()
+    data = _warnings_payload_bytes()
+    file = discord.File(io.BytesIO(data), filename=WARNINGS_BACKUP_FILENAME)
+    try:
+        await channel.send(
+            content=(
+                f"{WARNINGS_BACKUP_MARKER} | records={len(user_warnings)} | "
+                f"reason={reason} | <t:{int(time.time())}:f>"
+            ),
+            file=file,
+        )
+    except discord.HTTPException as exc:
+        print(f"Warnings backup post failed: {exc}")
+        return False
+
+    await _prune_old_warnings_backups(channel)
+    print(f"Warnings backup posted ({reason}): {len(user_warnings)} records.")
+    return True
+
+
+async def _restore_warnings_from_discord() -> bool:
+    """Load newest warnings JSON backup from the backup channel (Render-safe)."""
+    channel = _get_warnings_backup_channel()
+    if channel is None:
+        print(f"No warnings backup channel ({WARNINGS_BACKUP_CHANNEL_ID}).")
+        return False
+
+    global user_warnings
+    try:
+        async for message in channel.history(limit=50):
+            if message.author.id != bot.user.id:
+                continue
+            if WARNINGS_BACKUP_MARKER not in (message.content or ""):
+                continue
+            for attachment in message.attachments:
+                name = (attachment.filename or "").lower()
+                if name != WARNINGS_BACKUP_FILENAME and not name.endswith(".json"):
+                    continue
+                try:
+                    raw_bytes = await attachment.read()
+                    raw = json.loads(raw_bytes.decode("utf-8"))
+                    if not isinstance(raw, dict):
+                        continue
+                    user_warnings = {int(k): int(v) for k, v in raw.items()}
+                    _save_warnings()
+                    print(
+                        f"Restored {len(user_warnings)} warning records from Discord backup "
+                        f"(message {message.id})."
+                    )
+                    return True
+                except Exception as exc:
+                    print(f"Failed reading warnings backup attachment: {exc}")
+                    continue
+    except discord.HTTPException as exc:
+        print(f"Warnings backup restore failed: {exc}")
+        return False
+
+    print("No Discord warnings backup found.")
+    return False
+
+
 def _voice_minutes_for_level(level: int) -> int:
     return LEVEL_MINUTES_BASE * level * (level + 1) // 2
 
@@ -2632,6 +2751,18 @@ async def on_ready():
     _startup_done = True
 
     _load_warnings()
+    if WARNINGS_RESTORE_FROM_DISCORD:
+        if await _restore_warnings_from_discord():
+            print("Using Discord warnings backup as source of truth.")
+        else:
+            print("Using local warnings file (no Discord backup yet).")
+    else:
+        print(
+            f"Using local warnings file only ({len(user_warnings)} records) — "
+            "WARNINGS_RESTORE_FROM_DISCORD is off."
+        )
+    await _post_warnings_backup(reason="startup")
+
     _load_levels_database()
     if LEVELS_RESTORE_FROM_DISCORD:
         if await _restore_levels_from_discord():
@@ -2822,6 +2953,20 @@ async def before_levels_backup_task():
     await bot.wait_until_ready()
     # Wait one full interval before first hourly post (startup restore already loaded data).
     await asyncio.sleep(LEVELS_BACKUP_HOURS * 3600)
+
+
+@tasks.loop(hours=WARNINGS_BACKUP_HOURS)
+async def warnings_backup_task():
+    if not user_warnings:
+        return
+    await _post_warnings_backup(reason="hourly")
+
+
+@warnings_backup_task.before_loop
+async def before_warnings_backup_task():
+    await bot.wait_until_ready()
+    # Wait one full interval before first hourly post (startup restore already loaded data).
+    await asyncio.sleep(WARNINGS_BACKUP_HOURS * 3600)
 
 
 @bot.tree.command(name="ping", description="Vérifie si le bot est en ligne")
@@ -3061,6 +3206,32 @@ async def reload_levels_cmd(ctx):
     _load_levels_database()
     await ctx.send(
         f"✅ Reloaded **{len(user_levels)}** level records from `{LEVELS_DB_FILE}`.",
+        delete_after=12,
+    )
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="backupwarnings", aliases=["warningsbackup"])
+@commands.has_permissions(manage_guild=True)
+async def backup_warnings_cmd(ctx):
+    """Force-post warnings JSON backup to the backup channel."""
+    ok = await _post_warnings_backup(reason=f"manual:{ctx.author.id}")
+    if ok:
+        await ctx.send("✅ Warnings backup t7at fil channel.", delete_after=10)
+    else:
+        await ctx.send("❌ Backup fashal — chouf logs / channel ID.", delete_after=12)
+
+
+@bot.command(name="reloadwarnings", aliases=["loadwarnings"])
+@commands.has_permissions(manage_guild=True)
+async def reload_warnings_cmd(ctx):
+    """Reload warnings from data/warnings_database.json (ignores Discord backup)."""
+    _load_warnings()
+    await ctx.send(
+        f"✅ Reloaded **{len(user_warnings)}** warning record(s) from `{WARNINGS_FILE}`.",
         delete_after=12,
     )
     try:
@@ -3722,6 +3893,73 @@ async def _finish_staff_command(ctx, posted: bool, log_channel=None):
         pass
 
 
+async def _deliver_punishment_payload(
+    log_channel,
+    content: str,
+    card_bytes: bytes,
+    dm_recipient: discord.abc.User | None,
+    dm_lines: list[str],
+) -> bool:
+    """Actually post the card to the log channel and DM the recipient.
+
+    Shared by the immediate send path and the rate-limit retry path below, so a
+    card that gets queued for later delivery goes out exactly the same way as
+    one sent right away.
+    """
+    try:
+        await _api_call_with_retry(
+            lambda: _send_to_punishment_log(
+                log_channel,
+                content,
+                discord.File(io.BytesIO(card_bytes), filename="punishment.png"),
+            ),
+            label="Punishment log post",
+        )
+    except discord.Forbidden:
+        print(f"Forbidden posting punishment to {log_channel.id} ({type(log_channel).__name__})")
+        return False
+    except discord.HTTPException as exc:
+        print(f"Punishment post failed in {log_channel.id}: {exc.text}")
+        return False
+    except Exception as exc:
+        print(f"Punishment post unexpected error in {log_channel.id}: {exc}")
+        return False
+
+    if dm_recipient and not dm_recipient.bot:
+        dm_file = discord.File(io.BytesIO(card_bytes), filename="punishment.png")
+        try:
+            await dm_recipient.send("\n".join(dm_lines), file=dm_file)
+        except discord.Forbidden:
+            print(f"Punishment DM blocked for {dm_recipient.id} (DMs closed)")
+        except discord.HTTPException as exc:
+            print(f"Punishment DM failed for {dm_recipient.id}: {exc.text}")
+        except Exception as exc:
+            print(f"Punishment DM unexpected error for {dm_recipient.id}: {exc}")
+    return True
+
+
+async def _deliver_punishment_payload_delayed(
+    log_channel,
+    content: str,
+    card_bytes: bytes,
+    dm_recipient: discord.abc.User | None,
+    dm_lines: list[str],
+) -> None:
+    """Retry a rate-limit-capped punishment post once the per-minute bucket frees up.
+
+    Polls every 5s for up to 5 minutes so "log card delayed" (told to staff at
+    the call site) is actually true instead of the card silently vanishing.
+    """
+    waited = 0
+    while not _should_post_punishment():
+        await asyncio.sleep(5)
+        waited += 5
+        if waited >= 300:
+            print("Punishment log post gave up after 5min still rate-limited — dropping.")
+            return
+    await _deliver_punishment_payload(log_channel, content, card_bytes, dm_recipient, dm_lines)
+
+
 async def _post_punishment_card(
     ctx,
     punishment_type: str,
@@ -3743,7 +3981,6 @@ async def _post_punishment_card(
         return False
 
     card_bytes = buffer.getvalue()
-    image_file = discord.File(io.BytesIO(card_bytes), filename="punishment.png")
     label = PUNISHMENT_LABELS[punishment_type]
     content = f"New Punishment: **{label}** -> {target.mention}"
     if preview:
@@ -3758,61 +3995,36 @@ async def _post_punishment_card(
         await _finish_staff_command(ctx, False)
         return False
 
+    dm_recipient = ctx.author if preview else target
+    dm_lines = [
+        f"⚠️ **Punishment — {label}**",
+        f"**Server:** {ctx.guild.name}",
+        f"**Reason:** {reason}",
+    ]
+    if preview:
+        dm_lines.insert(0, "*(Preview — hedha ma howach punishment 7a9i9i)*")
+    if duration:
+        dm_lines.append(f"**Duration:** {_format_duration(duration)}")
+    if extra_note:
+        dm_lines.append(extra_note)
+
     if not preview and not _should_post_punishment():
-        print(f"Punishment log post skipped (cap {PUNISHMENT_POST_CAP}/min).")
+        print(f"Punishment log post capped ({PUNISHMENT_POST_CAP}/min) for {target.id} — queued for retry.")
         await ctx.send(
-            "Punishment applied but log card delayed (rate limit protection).",
+            "Punishment applied — log card queued (rate limit protection), posting shortly.",
             delete_after=12,
         )
         if finish_command:
             await _finish_staff_command(ctx, True, log_channel)
+        asyncio.create_task(
+            _deliver_punishment_payload_delayed(log_channel, content, card_bytes, dm_recipient, dm_lines)
+        )
         return True
 
-    try:
-        await _api_call_with_retry(
-            lambda: _send_to_punishment_log(
-                log_channel,
-                content,
-                discord.File(io.BytesIO(card_bytes), filename="punishment.png"),
-            ),
-            label="Punishment log post",
-        )
-    except discord.Forbidden:
-        print(f"Forbidden posting punishment to {log_channel.id} ({type(log_channel).__name__})")
+    delivered = await _deliver_punishment_payload(log_channel, content, card_bytes, dm_recipient, dm_lines)
+    if not delivered:
         await _finish_staff_command(ctx, False, log_channel)
         return False
-    except discord.HTTPException as exc:
-        print(f"Punishment post failed in {log_channel.id}: {exc.text}")
-        await _finish_staff_command(ctx, False, log_channel)
-        return False
-    except Exception as exc:
-        print(f"Punishment post unexpected error in {log_channel.id}: {exc}")
-        await ctx.send(f"Punishment post failed: {exc}", delete_after=12)
-        return False
-
-    dm_recipient = ctx.author if preview else target
-    if dm_recipient and not dm_recipient.bot:
-        dm_lines = [
-            f"⚠️ **Punishment — {label}**",
-            f"**Server:** {ctx.guild.name}",
-            f"**Reason:** {reason}",
-        ]
-        if preview:
-            dm_lines.insert(0, "*(Preview — hedha ma howach punishment 7a9i9i)*")
-        if duration:
-            dm_lines.append(f"**Duration:** {_format_duration(duration)}")
-        if extra_note:
-            dm_lines.append(extra_note)
-        dm_file = discord.File(io.BytesIO(card_bytes), filename="punishment.png")
-        try:
-            await dm_recipient.send("\n".join(dm_lines), file=dm_file)
-        except discord.Forbidden:
-            who = "command author" if preview else f"target {target.id}"
-            print(f"Punishment DM blocked for {who} (DMs closed)")
-        except discord.HTTPException as exc:
-            print(f"Punishment DM failed for {dm_recipient.id}: {exc.text}")
-        except Exception as exc:
-            print(f"Punishment DM unexpected error for {dm_recipient.id}: {exc}")
 
     if finish_command:
         await _finish_staff_command(ctx, True, log_channel)
@@ -4012,6 +4224,8 @@ class PanelChatMuteModal(discord.ui.Modal, title="Chat Mute Member"):
             return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
         if not _can_punish_target(moderator, member):
             return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if _is_ban_timeout_immune(member):
+            return await interaction.followup.send("❌ Ma tnajemch t-chat-mute had el membre (role protégé).", ephemeral=True)
 
         delta = _parse_duration(self.duration_input.value)
         if not delta or delta > MAX_TIMEOUT:
@@ -4048,6 +4262,8 @@ class PanelVoiceMuteModal(discord.ui.Modal, title="Voice Mute Member"):
             return await interaction.followup.send("You need **Moderate Members** permission.", ephemeral=True)
         if not _can_punish_target(moderator, member):
             return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if _is_ban_timeout_immune(member):
+            return await interaction.followup.send("❌ Ma tnajemch t-voice-mute had el membre (role protégé).", ephemeral=True)
 
         delta = _parse_duration(self.duration_input.value)
         if not delta or delta > MAX_TIMEOUT:
@@ -4083,6 +4299,8 @@ class PanelWarnModal(discord.ui.Modal, title="Warn Member"):
         moderator = interaction.user
         if not _can_punish_target(moderator, member):
             return await interaction.followup.send("You cannot punish this member.", ephemeral=True)
+        if _is_ban_timeout_immune(member):
+            return await interaction.followup.send("❌ Ma tnajemch t-warni had el membre (role protégé).", ephemeral=True)
 
         reason = self.reason_input.value or "No reason provided"
         ctx = _PanelCtx(interaction)
@@ -4090,11 +4308,11 @@ class PanelWarnModal(discord.ui.Modal, title="Warn Member"):
         count = _add_warning(member.id)
         await _apply_warn_consequences(member, count, moderator, reason)
 
-        card_note = f"**({count}/{MAX_WARNS_BEFORE_BAN})**"
-        is_warn_3 = count >= MAX_WARNS_BEFORE_BAN
+        card_note = f"**({count}/{MAX_WARNS_BEFORE_MUTE})**"
+        is_warn_3 = count >= MAX_WARNS_BEFORE_MUTE
         if is_warn_3:
             _clear_warnings(member.id)
-            card_note = f"**({MAX_WARNS_BEFORE_BAN}/{MAX_WARNS_BEFORE_BAN})**"
+            card_note = f"**({MAX_WARNS_BEFORE_MUTE}/{MAX_WARNS_BEFORE_MUTE})**"
 
         ok = await _post_punishment_card(
             ctx, "warn", member, reason, extra_note=card_note, finish_command=not is_warn_3
@@ -4114,7 +4332,7 @@ class PanelWarnModal(discord.ui.Modal, title="Warn Member"):
 
         if ok:
             await interaction.followup.send(
-                f"✅ Warn applied to {member.mention} ({count}/{MAX_WARNS_BEFORE_BAN}).", ephemeral=True
+                f"✅ Warn applied to {member.mention} ({count}/{MAX_WARNS_BEFORE_MUTE}).", ephemeral=True
             )
 
 
@@ -4127,7 +4345,7 @@ class PanelWarningsModal(discord.ui.Modal, title="Check Warnings"):
             return await interaction.response.send_message("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
         count = _get_warning_count(member.id)
         await interaction.response.send_message(
-            f"{member.mention} has **{count}/{MAX_WARNS_BEFORE_BAN}** warning(s).", ephemeral=True
+            f"{member.mention} has **{count}/{MAX_WARNS_BEFORE_MUTE}** warning(s).", ephemeral=True
         )
 
 
@@ -4144,6 +4362,8 @@ class PanelClearWarnModal(discord.ui.Modal, title="Clear Warnings"):
             return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
         if member.bot:
             return await interaction.followup.send("Bots cannot have warnings.", ephemeral=True)
+        if not _can_punish_target(interaction.user, member):
+            return await interaction.followup.send("You cannot manage this member's warnings.", ephemeral=True)
 
         current = _get_warning_count(member.id)
         if current == 0:
@@ -4153,7 +4373,7 @@ class PanelClearWarnModal(discord.ui.Modal, title="Clear Warnings"):
         if token == "all":
             _clear_warnings(member.id)
             remaining = 0
-            msg = f"All warnings cleared for {member.mention} (was **{current}/{MAX_WARNS_BEFORE_BAN}**)."
+            msg = f"All warnings cleared for {member.mention} (was **{current}/{MAX_WARNS_BEFORE_MUTE}**)."
         else:
             try:
                 remove_count = int(token)
@@ -4166,7 +4386,7 @@ class PanelClearWarnModal(discord.ui.Modal, title="Clear Warnings"):
             remaining = _get_warning_count(member.id)
             msg = (
                 f"Removed **{min(remove_count, current)}** warning(s) from {member.mention}. "
-                f"Now **{remaining}/{MAX_WARNS_BEFORE_BAN}**."
+                f"Now **{remaining}/{MAX_WARNS_BEFORE_MUTE}**."
             )
 
         try:
@@ -4754,6 +4974,10 @@ async def _close_with_save():
     if user_warnings:
         if _save_warnings():
             print("Warnings saved locally before shutdown.")
+        try:
+            await _post_warnings_backup(reason="shutdown")
+        except Exception as exc:
+            print(f"Warnings backup on shutdown failed: {exc}")
     if user_levels:
         _save_levels_database()
         try:
