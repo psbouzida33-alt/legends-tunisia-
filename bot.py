@@ -46,6 +46,7 @@ SUPPORT_CHANNEL_ID = _env_channel_id("SUPPORT_CHANNEL_ID", 1518020513174130769)
 VERIFICATION_1_ID = _env_channel_id("VERIFICATION_1_ID", 1517597478378143937)
 VERIFICATION_2_ID = _env_channel_id("VERIFICATION_2_ID", 1517666468593143940)
 STAFF_ROLE_ID = 1517586424306598140
+TRIAL_STAFF_ROLE_ID = 1536024113892687892  # Trial Staff — treated the same as Staff everywhere
 
 NOT_VERIFIED_ROLE_ID = 1517593118399139840
 WELCOME_CHANNEL_ID = 1511674200543199333
@@ -72,13 +73,14 @@ SUPPORT_NOTIFY_ROLE_IDS = [
     1518010188685246464,
     1517605837252853951,
     1517586424306598140,
+    TRIAL_STAFF_ROLE_ID,
 ]
 
-# Support: DM sent to members who have these roles when a normal user joins
+# Full staff list: Staff + Trial Staff, treated identically everywhere (tickets,
+# punishment panel, room permissions, staff alerts). Add more staff role IDs here.
 STAFF_ROLE_IDS = [
     STAFF_ROLE_ID,
-    # Add more staff role IDs:
-    # 1517586424306598140,
+    TRIAL_STAFF_ROLE_ID,
 ]
 
 GIVEAWAY_CHANNEL_ID = 1518721917312434197
@@ -417,7 +419,7 @@ async def _create_join_to_create_room(member, trigger_channel):
     try:
         category = trigger_channel.category
         everyone_role = guild.default_role
-        staff_role = guild.get_role(STAFF_ROLE_ID)
+        staff_roles = _get_staff_roles(guild)
         boy_role = guild.get_role(BOY_ROLE_ID)
         girl_role = guild.get_role(GIRL_ROLE_ID)
 
@@ -434,14 +436,15 @@ async def _create_join_to_create_room(member, trigger_channel):
                 overwrites[girl_role] = discord.PermissionOverwrite(
                     view_channel=True, connect=True, speak=True, send_messages=True
                 )
-        elif config["kind"] in ("support", "verification") and staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True,
-                send_messages=True,
-                move_members=True,
-            )
+        elif config["kind"] in ("support", "verification"):
+            for staff_role in staff_roles:
+                overwrites[staff_role] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    send_messages=True,
+                    move_members=True,
+                )
 
         overwrites[member] = discord.PermissionOverwrite(
             view_channel=True,
@@ -532,8 +535,7 @@ async def _set_room_locked(channel, *, locked: bool):
             role_ow.connect = False
             await channel.set_permissions(role, overwrite=role_ow)
 
-        staff_role = guild.get_role(STAFF_ROLE_ID)
-        if staff_role:
+        for staff_role in _get_staff_roles(guild):
             await channel.set_permissions(
                 staff_role,
                 view_channel=True,
@@ -858,6 +860,11 @@ def _member_has_any_role(member, role_ids):
     return any(rid in member_role_ids for rid in role_ids)
 
 
+def _get_staff_roles(guild: discord.Guild):
+    """Resolve STAFF_ROLE_IDS (Staff, Trial Staff, ...) to Role objects that exist in the guild."""
+    return [r for rid in STAFF_ROLE_IDS if (r := guild.get_role(rid))]
+
+
 def _get_giveaway_guild():
     channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
     return channel.guild if channel else None
@@ -1059,8 +1066,7 @@ def _is_ticket_text_channel(channel: discord.abc.GuildChannel) -> bool:
 def _is_ticket_staff(member: discord.Member) -> bool:
     if member.guild_permissions.manage_guild:
         return True
-    staff_role = member.guild.get_role(STAFF_ROLE_ID)
-    return bool(staff_role and staff_role in member.roles)
+    return _member_has_any_role(member, STAFF_ROLE_IDS)
 
 
 def _get_ticket_panel_channel(guild: discord.Guild):
@@ -1090,9 +1096,10 @@ async def _log_ticket_message_to_staff(message: discord.Message):
         return
 
     preview = message.content[:500] if message.content else "(attachment/embed)"
+    role_mentions = " ".join(role.mention for role in _get_staff_roles(message.guild))
     try:
         await log_channel.send(
-            f"🔔 <@&{STAFF_ROLE_ID}> **[Ticket - {message.author.name}]** "
+            f"🔔 {role_mentions} **[Ticket - {message.author.name}]** "
             f"fil chat `{message.channel.name}`:\n> {preview}"
         )
     except discord.HTTPException as exc:
@@ -1100,7 +1107,7 @@ async def _log_ticket_message_to_staff(message: discord.Message):
 
 
 def _get_staff_ticket_roles(guild: discord.Guild):
-    role_ids = {STAFF_ROLE_ID, *SUPPORT_NOTIFY_ROLE_IDS}
+    role_ids = {*STAFF_ROLE_IDS, *SUPPORT_NOTIFY_ROLE_IDS}
     roles = []
     seen = set()
     for role_id in role_ids:
@@ -1178,7 +1185,7 @@ def _can_manage_ticket(member: discord.Member, ticket_owner_id: int) -> bool:
         return True
     if member.guild_permissions.manage_channels:
         return True
-    return _member_has_any_role(member, [STAFF_ROLE_ID, *SUPPORT_NOTIFY_ROLE_IDS])
+    return _member_has_any_role(member, [*STAFF_ROLE_IDS, *SUPPORT_NOTIFY_ROLE_IDS])
 
 
 async def _create_text_ticket(interaction: discord.Interaction, category_key: str):
@@ -1219,7 +1226,7 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
     category_meta = TICKET_CATEGORIES[category_key]
     channel_name = _ticket_channel_name(member, category_key)
 
-    staff_role = guild.get_role(STAFF_ROLE_ID)
+    staff_roles = _get_staff_roles(guild)
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False, read_messages=False),
         member: discord.PermissionOverwrite(
@@ -1231,7 +1238,7 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
             embed_links=True,
         ),
     }
-    if staff_role:
+    for staff_role in staff_roles:
         overwrites[staff_role] = discord.PermissionOverwrite(
             view_channel=True,
             read_messages=True,
@@ -1274,10 +1281,7 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
     close_view = TicketCloseView(ticket_channel.id)
     bot.add_view(close_view)
 
-    staff_role = guild.get_role(STAFF_ROLE_ID)
-    ping_parts = [member.mention]
-    if staff_role:
-        ping_parts.append(staff_role.mention)
+    ping_parts = [member.mention, *(role.mention for role in staff_roles)]
     await ticket_channel.send(
         " ".join(ping_parts),
         embed=_build_ticket_welcome_embed(member, category_key, ticket_number=ticket_number),
@@ -1287,8 +1291,9 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
     log_channel = guild.get_channel(TICKET_LOG_CHANNEL_ID)
     if log_channel:
         try:
+            role_mentions = " ".join(role.mention for role in staff_roles)
             await log_channel.send(
-                f"🔔 <@&{STAFF_ROLE_ID}> **Ticket jdid** — {member.mention} "
+                f"🔔 {role_mentions} **Ticket jdid** — {member.mention} "
                 f"({category_meta['label']}) → {ticket_channel.mention}"
             )
         except discord.HTTPException as exc:
@@ -3798,8 +3803,7 @@ def _is_punishment_staff(member: discord.Member) -> bool:
         return True
     if member.guild_permissions.ban_members:
         return True
-    staff_role = member.guild.get_role(STAFF_ROLE_ID)
-    return bool(staff_role and staff_role in member.roles)
+    return _member_has_any_role(member, STAFF_ROLE_IDS)
 
 
 def _can_punish_target(moderator: discord.Member, target: discord.Member) -> bool:
@@ -4901,19 +4905,12 @@ async def on_voice_state_update(member, before, after):
         if before.channel is None or before.channel.id != after.channel.id:
             has_not_verified_role = any(role.id == NOT_VERIFIED_ROLE_ID for role in member.roles)
             if has_not_verified_role:
-                staff_role = guild.get_role(STAFF_ROLE_ID)
-                if staff_role:
-                    embed_alert = discord.Embed(
-                        title="UNVERIFIED USER DETECTED IN VOICE",
-                        description=f"**User:** {member.mention}\n**Room:** {after.channel.name}",
-                        color=discord.Color.red(),
-                    )
-                    for staff_member in staff_role.members:
-                        if not staff_member.bot:
-                            try:
-                                await staff_member.send(embed=embed_alert)
-                            except discord.Forbidden:
-                                pass
+                embed_alert = discord.Embed(
+                    title="UNVERIFIED USER DETECTED IN VOICE",
+                    description=f"**User:** {member.mention}\n**Room:** {after.channel.name}",
+                    color=discord.Color.red(),
+                )
+                await _notify_roles_members(guild, STAFF_ROLE_IDS, embed_alert)
 
     if (
         after.channel
