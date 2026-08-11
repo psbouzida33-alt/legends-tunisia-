@@ -47,6 +47,7 @@ VERIFICATION_1_ID = _env_channel_id("VERIFICATION_1_ID", 1517597478378143937)
 VERIFICATION_2_ID = _env_channel_id("VERIFICATION_2_ID", 1517666468593143940)
 STAFF_ROLE_ID = 1517586424306598140
 TRIAL_STAFF_ROLE_ID = 1536024113892687892  # Trial Staff — treated the same as Staff everywhere
+MODERATION_ROLE_ID = 1534781116722974772  # Moderation team — support/tickets, treated the same as Staff everywhere
 
 NOT_VERIFIED_ROLE_ID = 1517593118399139840
 WELCOME_CHANNEL_ID = 1511674200543199333
@@ -74,13 +75,15 @@ SUPPORT_NOTIFY_ROLE_IDS = [
     1517605837252853951,
     1517586424306598140,
     TRIAL_STAFF_ROLE_ID,
+    MODERATION_ROLE_ID,
 ]
 
-# Full staff list: Staff + Trial Staff, treated identically everywhere (tickets,
+# Full staff list: Staff + Trial Staff + Moderation, treated identically everywhere (tickets,
 # punishment panel, room permissions, staff alerts). Add more staff role IDs here.
 STAFF_ROLE_IDS = [
     STAFF_ROLE_ID,
     TRIAL_STAFF_ROLE_ID,
+    MODERATION_ROLE_ID,
 ]
 
 GIVEAWAY_CHANNEL_ID = 1518721917312434197
@@ -4520,7 +4523,7 @@ class PunishmentPanelView(discord.ui.View):
 
 def _build_punishment_panel_embed() -> discord.Embed:
     return discord.Embed(
-        title="🛡️ Punishment Panel",
+        title="🛡️ Moderation Panel",
         description=(
             "Staff only. Click a button, type the member's **ID or @mention** "
             "and a reason — no need to remember the `?` commands.\n\n"
@@ -4528,15 +4531,14 @@ def _build_punishment_panel_embed() -> discord.Embed:
             "📋 **Warnings** (check count) · 🧹 **Clear Warn** · 🔓 **Untimeout** · 🔊 **Unmute**"
         ),
         color=discord.Color.from_rgb(88, 101, 242),
-    ).set_footer(text="Legends Tunisia — Punishment Panel")
+    ).set_footer(text="Legends Tunisia — Moderation Panel")
 
 
-@bot.tree.command(name="punishmentpanel", description="Post the punishment panel (Ban/Timeout/Mute/Warn buttons)")
-async def slash_punishmentpanel(interaction: discord.Interaction):
-    if not await _slash_manage_guild_gate(interaction):
-        return
-    await interaction.channel.send(embed=_build_punishment_panel_embed(), view=PunishmentPanelView())
-    await interaction.response.send_message("✅ Punishment panel posted.", ephemeral=True)
+@bot.command(name="moderationpanel")
+@commands.has_permissions(manage_guild=True)
+async def moderation_panel_cmd(ctx):
+    """Post the Moderation panel (Ban/Timeout/Mute/Warn buttons)."""
+    await ctx.send(embed=_build_punishment_panel_embed(), view=PunishmentPanelView())
 
 
 @bot.command(name="testpunishment", aliases=["testpunish"])
@@ -4568,8 +4570,8 @@ async def test_punishment_cmd(
 # here first. Commands whose own permission check already lives inline in the
 # function body (giveaway / stop / kickuser) don't need a hand-check — the
 # command re-validates itself either way.
-# Ban/Timeout/Mute/Warn stay on their own dedicated ?punishmentpanel /
-# /punishmentpanel — not duplicated here.
+# Ban/Timeout/Mute/Warn stay on their own dedicated ?moderationpanel —
+# not duplicated here.
 # ---------------------------------------------------------------------------
 
 
@@ -4720,25 +4722,24 @@ class AdminPanelView(discord.ui.View):
 
 def _build_admin_panel_embed() -> discord.Embed:
     return discord.Embed(
-        title="🛠️ Admin Panel",
+        title="🛠️ Staff Panel",
         description=(
             "Staff only. Click a button — modal ken lel commandes eli lazmouhom input.\n\n"
             "🔍 **Check Join/Create** · 🎫 **Check Ticket Category** · 🔔 **Set Notifications**\n"
             "🔄 **Sync Roles** · 👋 **Test Welcome**\n"
             "🎁 **Start Giveaway** · 🛑 **Stop Giveaway** · 🚫 **Kick (Giveaway)**\n"
             "🧪 **Test Punishment**\n\n"
-            "Punishment (Ban/Timeout/Mute/Warn) → `/punishmentpanel`."
+            "Punishment (Ban/Timeout/Mute/Warn) → `?moderationpanel`."
         ),
         color=discord.Color.from_rgb(88, 101, 242),
-    ).set_footer(text="Legends Tunisia — Admin Panel")
+    ).set_footer(text="Legends Tunisia — Staff Panel")
 
 
-@bot.tree.command(name="adminpanel", description="Post the admin panel (Sync Roles/Giveaway/Diagnostics/... buttons)")
-async def slash_adminpanel(interaction: discord.Interaction):
-    if not await _slash_manage_guild_gate(interaction):
-        return
-    await interaction.channel.send(embed=_build_admin_panel_embed(), view=AdminPanelView())
-    await interaction.response.send_message("✅ Admin panel posted.", ephemeral=True)
+@bot.command(name="staffpanel")
+@commands.has_permissions(manage_guild=True)
+async def staff_panel_cmd(ctx):
+    """Post the Staff panel (Sync Roles/Giveaway/Diagnostics/... buttons)."""
+    await ctx.send(embed=_build_admin_panel_embed(), view=AdminPanelView())
 
 
 @bot.event
