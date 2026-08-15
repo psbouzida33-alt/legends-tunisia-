@@ -45,6 +45,8 @@ SUPPORT_CHANNEL_ID = _env_channel_id("SUPPORT_CHANNEL_ID", 1518020513174130769)
 
 VERIFICATION_1_ID = _env_channel_id("VERIFICATION_1_ID", 1517597478378143937)
 VERIFICATION_2_ID = _env_channel_id("VERIFICATION_2_ID", 1517666468593143940)
+VERIFY_PANEL_CHANNEL_ID = _env_channel_id("VERIFY_PANEL_CHANNEL_ID", 1538183656563155034)  # ✅ Verify button panel lives here
+VERIFY_RESULT_CHANNEL_ID = _env_channel_id("VERIFY_RESULT_CHANNEL_ID", 1538183182199955606)  # verification audit log
 STAFF_ROLE_ID = 1517586424306598140
 TRIAL_STAFF_ROLE_ID = 1536024113892687892  # Trial Staff — treated the same as Staff everywhere
 MODERATION_ROLE_ID = 1534781116722974772  # Moderation team — support/tickets, treated the same as Staff everywhere
@@ -62,8 +64,8 @@ NEW_MEMBER_ROLE_IDS = [
 ]
 JOIN_AUTO_ROLE_IDS = [NOT_VERIFIED_ROLE_ID, *NEW_MEMBER_ROLE_IDS]
 
-BOY_ROLE_ID = 1517606739812417647
-GIRL_ROLE_ID = 1517606871064776804
+BOY_ROLE_ID = 1517606739812417647  # also the "Male Verified" role given by the Verify Panel
+GIRL_ROLE_ID = 1517606871064776804  # also the "Female Verified" role given by the Verify Panel
 
 # Support: user HAS any of these roles → no alert (staff/support team)
 SUPPORT_NOTIFY_ROLE_IDS = [
@@ -2825,6 +2827,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(PunishmentPanelView())
     bot.add_view(AdminPanelView())
+    bot.add_view(VerifyPanelView())
 
     for guild in bot.guilds:
         try:
@@ -2842,6 +2845,7 @@ async def on_ready():
             if GUILD_INIT_STEP_DELAY:
                 await asyncio.sleep(GUILD_INIT_STEP_DELAY)
             await _ensure_ticket_panel(guild)
+            await _ensure_verify_panel(guild)
             await _log_ticket_setup(guild)
         except Exception as e:
             print(f"Guild init failed for {guild.name}: {e}")
@@ -4740,6 +4744,167 @@ def _build_admin_panel_embed() -> discord.Embed:
 async def staff_panel_cmd(ctx):
     """Post the Staff panel (Sync Roles/Giveaway/Diagnostics/... buttons)."""
     await ctx.send(embed=_build_admin_panel_embed(), view=AdminPanelView())
+
+
+# ---------------------------------------------------------------------------
+# Verify panel — staff clicks ✅ Verify, fills member/age/gender in a modal.
+# The bot removes Not Verified and gives Male Verified (BOY_ROLE_ID) or
+# Female Verified (GIRL_ROLE_ID), then posts an audit embed to the
+# verification result log channel.
+# ---------------------------------------------------------------------------
+
+VERIFY_PANEL_TITLE = "✅ Verification Panel"
+
+
+def _normalize_gender_input(raw: str) -> str | None:
+    value = (raw or "").strip().lower()
+    if value in ("m", "male", "boy", "homme", "garcon", "garçon"):
+        return "male"
+    if value in ("f", "female", "girl", "femme", "fille"):
+        return "female"
+    return None
+
+
+def _build_verify_result_embed(
+    member: discord.Member, *, age: int, gender: str, moderator: discord.abc.User, role: discord.Role
+) -> discord.Embed:
+    gender_label = "👦 Male" if gender == "male" else "👧 Female"
+    embed = discord.Embed(
+        title="✅ Member Verified",
+        description=f"{member.mention} (`{member.name}`)",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Age", value=str(age), inline=True)
+    embed.add_field(name="Gender", value=gender_label, inline=True)
+    embed.add_field(name="Role Given", value=role.mention, inline=True)
+    embed.add_field(name="Account Created", value=discord.utils.format_dt(member.created_at, style="R"), inline=True)
+    embed.add_field(
+        name="Joined Server",
+        value=discord.utils.format_dt(member.joined_at, style="R") if member.joined_at else "Unknown",
+        inline=True,
+    )
+    embed.set_footer(text=f"Verified by {moderator}")
+    return embed
+
+
+class VerifyModal(discord.ui.Modal, title="Verify Member"):
+    member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
+    age_input = discord.ui.TextInput(label="Age", max_length=3, placeholder="e.g. 16")
+    gender_input = discord.ui.TextInput(label="Gender (M/F)", max_length=10, placeholder="M or F")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        member = _resolve_member_input(guild, self.member_input.value)
+        if member is None:
+            return await interaction.followup.send("❌ Ma l9itch had el membre (mention wla ID s7i7).", ephemeral=True)
+        if member.bot:
+            return await interaction.followup.send("❌ Ma tnajemch tverifi bot.", ephemeral=True)
+
+        age_raw = self.age_input.value.strip()
+        if not age_raw.isdigit() or not (1 <= int(age_raw) <= 99):
+            return await interaction.followup.send("❌ Age lazem ykoun number s7i7 (1-99).", ephemeral=True)
+        age = int(age_raw)
+
+        gender = _normalize_gender_input(self.gender_input.value)
+        if gender is None:
+            return await interaction.followup.send("❌ Gender lazem tekteb **M** wla **F**.", ephemeral=True)
+
+        target_role = guild.get_role(BOY_ROLE_ID if gender == "male" else GIRL_ROLE_ID)
+        if target_role is None:
+            return await interaction.followup.send(
+                "❌ Ma l9itch role el verified fel serveur (chouf BOY_ROLE_ID/GIRL_ROLE_ID fi bot.py).", ephemeral=True
+            )
+
+        not_verified_role = guild.get_role(NOT_VERIFIED_ROLE_ID)
+        moderator = interaction.user
+
+        try:
+            if not_verified_role and not_verified_role in member.roles:
+                await member.remove_roles(not_verified_role, reason=f"Verified by {moderator}")
+            if target_role not in member.roles:
+                await member.add_roles(target_role, reason=f"Verified by {moderator} (age {age}, {gender})")
+        except discord.Forbidden:
+            return await interaction.followup.send(
+                "❌ Ma3andich permissions bech na3mel role changes (chouf hierarchy mta3 el bot).", ephemeral=True
+            )
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"❌ Error: {exc.text}", ephemeral=True)
+
+        embed = _build_verify_result_embed(member, age=age, gender=gender, moderator=moderator, role=target_role)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        log_channel = guild.get_channel(VERIFY_RESULT_CHANNEL_ID) if VERIFY_RESULT_CHANNEL_ID else None
+        if log_channel:
+            try:
+                await log_channel.send(embed=embed)
+            except discord.HTTPException as exc:
+                print(f"Verify result log failed: {exc}")
+
+
+class VerifyPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Verify", emoji="✅", style=discord.ButtonStyle.success, custom_id="legends_panel:verify")
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not _is_punishment_staff(interaction.user):
+            return await interaction.response.send_message(
+                "You need staff permissions to verify members.", ephemeral=True
+            )
+        await interaction.response.send_modal(VerifyModal())
+
+
+def _build_verify_panel_embed() -> discord.Embed:
+    return discord.Embed(
+        title=VERIFY_PANEL_TITLE,
+        description=(
+            "Staff only. Check the member in the voice verification room first, then click "
+            "**Verify** and fill in their **ID/mention**, **age**, and **gender**.\n\n"
+            "The bot removes **Not Verified** and gives **Male Verified** / **Female Verified** automatically."
+        ),
+        color=discord.Color.from_rgb(87, 242, 135),
+    ).set_footer(text="Legends Tunisia — Verification Panel")
+
+
+def _get_verify_panel_channel(guild: discord.Guild):
+    if VERIFY_PANEL_CHANNEL_ID:
+        return guild.get_channel(VERIFY_PANEL_CHANNEL_ID)
+    return None
+
+
+async def _ensure_verify_panel(guild: discord.Guild):
+    channel = _get_verify_panel_channel(guild)
+    if not channel:
+        return
+
+    try:
+        async for message in channel.history(limit=25):
+            if message.author.id != bot.user.id:
+                continue
+            if not message.embeds:
+                continue
+            if (message.embeds[0].title or "") == VERIFY_PANEL_TITLE:
+                return
+    except discord.Forbidden:
+        return
+
+    await channel.send(embed=_build_verify_panel_embed(), view=VerifyPanelView())
+
+
+@bot.command(name="verifypanel")
+@commands.has_permissions(manage_guild=True)
+async def verify_panel_cmd(ctx):
+    """Post the Verify panel (age/gender verification, admin only)."""
+    target = ctx.channel
+    if VERIFY_PANEL_CHANNEL_ID:
+        panel_channel = ctx.guild.get_channel(VERIFY_PANEL_CHANNEL_ID)
+        if panel_channel:
+            target = panel_channel
+    await target.send(embed=_build_verify_panel_embed(), view=VerifyPanelView())
+    await ctx.send(f"✅ Verify panel posted in {target.mention}.", delete_after=8)
 
 
 @bot.event
