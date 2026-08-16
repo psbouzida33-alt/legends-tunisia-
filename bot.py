@@ -4766,7 +4766,13 @@ def _normalize_gender_input(raw: str) -> str | None:
 
 
 def _build_verify_result_embed(
-    member: discord.Member, *, age: int, gender: str, moderator: discord.abc.User, role: discord.Role
+    member: discord.Member,
+    *,
+    age: int,
+    gender: str,
+    source: str,
+    moderator: discord.abc.User,
+    role: discord.Role,
 ) -> discord.Embed:
     gender_label = "👦 Male" if gender == "male" else "👧 Female"
     embed = discord.Embed(
@@ -4785,6 +4791,7 @@ def _build_verify_result_embed(
         value=discord.utils.format_dt(member.joined_at, style="R") if member.joined_at else "Unknown",
         inline=True,
     )
+    embed.add_field(name="How they found us", value=source or "Not answered", inline=False)
     embed.set_footer(text=f"Verified by {moderator}")
     return embed
 
@@ -4793,6 +4800,9 @@ class VerifyModal(discord.ui.Modal, title="Verify Member"):
     member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
     age_input = discord.ui.TextInput(label="Age", max_length=3, placeholder="e.g. 16")
     gender_input = discord.ui.TextInput(label="Gender (M/F)", max_length=10, placeholder="M or F")
+    source_input = discord.ui.TextInput(
+        label="How did you get to know us?", max_length=200, placeholder="e.g. friend, TikTok, another server..."
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -4811,6 +4821,8 @@ class VerifyModal(discord.ui.Modal, title="Verify Member"):
         gender = _normalize_gender_input(self.gender_input.value)
         if gender is None:
             return await interaction.followup.send("❌ Gender lazem tekteb **M** wla **F**.", ephemeral=True)
+
+        source = self.source_input.value.strip()
 
         target_role = guild.get_role(BOY_ROLE_ID if gender == "male" else GIRL_ROLE_ID)
         if target_role is None:
@@ -4833,7 +4845,9 @@ class VerifyModal(discord.ui.Modal, title="Verify Member"):
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"❌ Error: {exc.text}", ephemeral=True)
 
-        embed = _build_verify_result_embed(member, age=age, gender=gender, moderator=moderator, role=target_role)
+        embed = _build_verify_result_embed(
+            member, age=age, gender=gender, source=source, moderator=moderator, role=target_role
+        )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
         log_channel = guild.get_channel(VERIFY_RESULT_CHANNEL_ID) if VERIFY_RESULT_CHANNEL_ID else None
@@ -4862,7 +4876,8 @@ def _build_verify_panel_embed() -> discord.Embed:
         title=VERIFY_PANEL_TITLE,
         description=(
             "Staff only. Check the member in the voice verification room first, then click "
-            "**Verify** and fill in their **ID/mention**, **age**, and **gender**.\n\n"
+            "**Verify** and fill in their **ID/mention**, **age**, **gender**, and "
+            "**how they found us**.\n\n"
             "The bot removes **Not Verified** and gives **Male Verified** / **Female Verified** automatically."
         ),
         color=discord.Color.from_rgb(87, 242, 135),
