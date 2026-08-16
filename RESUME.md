@@ -58,8 +58,8 @@
 | `/postroles` | — | Poste le menu sélection rôles jeux. (slash uniquement) |
 | `?syncroles` | `?syncjoinroles` | Donne les 5 rôles join aux membres (`?syncroles` ou `?syncroles @user`). |
 | `/ticketpanel` | — | Poste le panneau tickets (Support / Report / Bugs). (slash uniquement) |
-| `/punishmentpanel` | — | Poste le panel punishment (Ban/Timeout/Mute/Warn/...). (slash uniquement) |
-| `/adminpanel` | — | Poste l'admin panel (diagnostics/syncroles/giveaway/testwelcome/testpunishment en boutons). (slash uniquement) |
+| `?moderationpanel` | — | Poste le Moderation Panel (Ban/Timeout/Mute/Warn/...). |
+| `?staffpanel` | — | Poste le Staff Panel (diagnostics/syncroles/giveaway/testwelcome/testpunishment en boutons). |
 
 ---
 
@@ -94,9 +94,9 @@ Boutons giveaway : **Join Giveaway**, **Chkoun Charek**.
 
 ## Modération / Punishment
 
-**Staff** = rôle Staff **ou** Manage Server / Moderate Members / Ban Members — condition pour **voir/ouvrir** le panel.
+**Staff** = rôle Staff **ou** Manage Server / Moderate Members / Ban Members — condition pour **voir/ouvrir** le panel. **Moderation** (rôle `1534781116722974772`) fait partie du staff complet — mêmes accès partout (tickets, panel, alertes).
 
-Panel-only — pas de commande `?ban`/`?timeout`/etc. Tout passe par le [punishment panel](#) (`/punishmentpanel`, slash) : un bouton par action, modal pour l'ID/mention + raison.
+Panel-only — pas de commande `?ban`/`?timeout`/etc. Tout passe par le [Moderation Panel](#) (`?moderationpanel`) : un bouton par action, modal pour l'ID/mention + raison.
 
 ⚠️ **Le rôle Staff seul n'est pas suffisant pour tous les boutons.** Une fois le modal ouvert, Ban/Timeout/Chat Mute/Voice Mute/Untimeout/Unmute revérifient une vraie permission Discord (le rôle custom ne compte pas ici) ; seuls Warn/Warnings/Clear Warn se contentent de la condition Staff ci-dessus. C'est voulu : un membre qui n'a que le rôle Staff (sans Manage Server/Moderate Members/Ban Members) peut avertir et consulter/effacer des warnings, mais ne peut pas bannir, timeout ou mute qui que ce soit.
 
@@ -133,7 +133,7 @@ Le rôle **Giveaway Admin** est protégé (`_is_ban_timeout_immune`) contre Ban/
 
 ---
 
-## Admin Panel (`/adminpanel`)
+## Staff Panel (`?staffpanel`)
 
 **Manage Server** requis pour poster le panel et pour la plupart des boutons (Giveaway = rôle Giveaway Admin, Test Punishment = Staff punishment). Chaque bouton appelle exactement la même commande que sa version `?` — même comportement, juste un member picker/modal au lieu de taper la commande.
 
@@ -268,13 +268,14 @@ Version réduite (Pydroid) : join-to-create lounge + `!level` simplifié. Pas de
 ?stop
 ?kickuser
 ?testpunishment | ?testpunish
+?moderationpanel
+?staffpanel
 ```
 
 Slash uniquement (pas de version `?`):
-- `/postroles`, `/ticketpanel`, `/punishmentpanel` — postent chacun leur panel.
-- `/adminpanel` — panel admin (checkjoincreate/checkticketcategory/setnotifications/syncroles/testwelcome/giveaway/stop/kickuser/testpunishment en boutons).
+- `/postroles`, `/ticketpanel` — postent chacun leur panel (member-facing).
 
-Punishment (ban/timeout/mute/warn/...) : boutons du `/punishmentpanel` uniquement, pas de commande texte.
+Punishment (ban/timeout/mute/warn/...) : boutons du `?moderationpanel` uniquement, pas de commande texte. Panel staff général (diagnostics/syncroles/testwelcome/giveaway/stop/kickuser/testpunishment) : `?staffpanel`.
 
 ---
 
