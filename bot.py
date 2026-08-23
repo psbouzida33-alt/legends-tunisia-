@@ -376,15 +376,20 @@ def _log_join_to_create_startup(guild: discord.Guild) -> None:
 
 async def _notify_join_create_failure(member: discord.Member, message: str) -> None:
     try:
-        await member.send(
-            embed=discord.Embed(
-                title="Could not create your voice room",
-                description=message,
-                color=discord.Color.red(),
-            )
+        await _api_call_with_retry(
+            lambda: member.send(
+                embed=discord.Embed(
+                    title="Could not create your voice room",
+                    description=message,
+                    color=discord.Color.red(),
+                )
+            ),
+            label=f"Join-to-create failure DM to {member.id}",
         )
     except discord.Forbidden:
         pass
+    except discord.HTTPException as exc:
+        print(f"Join-to-create failure DM to {member.id} failed: {exc}")
 
 
 async def _create_join_to_create_room(member, trigger_channel):
@@ -855,9 +860,17 @@ async def _notify_roles_members(guild, role_ids, embed):
                 continue
             notified.add(role_member.id)
             try:
-                await role_member.send(embed=embed)
+                await _api_call_with_retry(
+                    lambda rm=role_member: rm.send(embed=embed),
+                    label=f"Staff alert DM to {role_member.id}",
+                )
             except discord.Forbidden:
                 pass
+            except discord.HTTPException as exc:
+                print(f"Staff alert DM to {role_member.id} failed: {exc}")
+            # Small gap between DMs so a big staff list doesn't burst past
+            # Discord's global rate limit in one shot.
+            await asyncio.sleep(0.35)
 
 
 def _member_has_any_role(member, role_ids):
