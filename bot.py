@@ -5195,7 +5195,17 @@ def _handle_login_rate_limit(exc: discord.HTTPException) -> None:
     attempt = int(os.environ.get("DISCORD_LOGIN_ATTEMPT", "1"))
     max_attempts = max(1, int(os.getenv("DISCORD_LOGIN_MAX_ATTEMPTS", "6")))
     retry_after = float(getattr(exc, "retry_after", 0) or 0)
-    wait = min(max(retry_after, 60), 600) if retry_after else 90
+
+    # A "global" block (Discord cutting off the whole bot, not just this route — the
+    # message says "exceeding global rate limits") tends to outlast a normal per-route
+    # 429 by a lot. Retrying after the usual short wait just re-trips it and burns
+    # through max_attempts in minutes instead of actually waiting it out. Detect it and
+    # back off much harder, growing with each attempt.
+    is_global = "global rate limit" in str(getattr(exc, "text", "") or "").lower()
+    if is_global:
+        wait = min(300 * (2 ** (attempt - 1)), 1800)
+    else:
+        wait = min(max(retry_after, 60), 600) if retry_after else 90
 
     if attempt >= max_attempts:
         raise SystemExit(
@@ -5206,8 +5216,9 @@ def _handle_login_rate_limit(exc: discord.HTTPException) -> None:
         )
 
     print(
-        f"Discord login rate-limited (429). Attempt {attempt}/{max_attempts}. "
-        f"Health check stays up; waiting {wait:.0f}s before a fresh login retry..."
+        f"Discord login rate-limited (429{', global block' if is_global else ''}). "
+        f"Attempt {attempt}/{max_attempts}. Health check stays up; waiting {wait:.0f}s "
+        "before a fresh login retry..."
     )
     time.sleep(wait)
     os.environ["DISCORD_LOGIN_ATTEMPT"] = str(attempt + 1)
