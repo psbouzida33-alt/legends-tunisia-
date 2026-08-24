@@ -5203,23 +5203,29 @@ def _handle_login_rate_limit(exc: discord.HTTPException) -> None:
     # back off much harder, growing with each attempt.
     is_global = "global rate limit" in str(getattr(exc, "text", "") or "").lower()
     if is_global:
-        wait = min(300 * (2 ** (attempt - 1)), 1800)
+        wait = min(300 * (2 ** (min(attempt, max_attempts) - 1)), 1800)
     else:
         wait = min(max(retry_after, 60), 600) if retry_after else 90
 
+    # Previously gave up with SystemExit once max_attempts was reached. A hard global
+    # block can outlast that whole backoff window (which is under 2 hours even at the
+    # 30min cap), and Render does not always keep auto-restarting a repeatedly-crashing
+    # process — it can require a manual redeploy, leaving the bot offline until a human
+    # notices. Keep retrying forever at the capped interval instead so it self-heals
+    # once Discord lifts the block.
     if attempt >= max_attempts:
-        raise SystemExit(
-            "Discord login still rate-limited (429) after "
-            f"{max_attempts} attempts. Stop every other instance using this token "
-            "(local PC, second Render service, bot_all_in_one.py), wait 30 minutes, "
-            "then redeploy once."
+        print(
+            f"Discord login still rate-limited (429{', global block' if is_global else ''}) "
+            f"after {max_attempts} attempts. Health check stays up; still retrying every "
+            f"{wait:.0f}s. If this persists for hours, stop every other instance using "
+            "this token (local PC, second Render service, bot_all_in_one.py)."
         )
-
-    print(
-        f"Discord login rate-limited (429{', global block' if is_global else ''}). "
-        f"Attempt {attempt}/{max_attempts}. Health check stays up; waiting {wait:.0f}s "
-        "before a fresh login retry..."
-    )
+    else:
+        print(
+            f"Discord login rate-limited (429{', global block' if is_global else ''}). "
+            f"Attempt {attempt}/{max_attempts}. Health check stays up; waiting {wait:.0f}s "
+            "before a fresh login retry..."
+        )
     time.sleep(wait)
     os.environ["DISCORD_LOGIN_ATTEMPT"] = str(attempt + 1)
     os.execv(sys.executable, [sys.executable, *sys.argv])
