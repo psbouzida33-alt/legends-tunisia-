@@ -1,7 +1,9 @@
 import io
+import os
+import unicodedata
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 # Optional: set a custom background URL (same idea as welcome_card.py)
 BACKGROUND_URL = ""
@@ -153,34 +155,92 @@ def _build_canvas(background_bytes: bytes | None) -> Image.Image:
     return bg
 
 
+# Template card (1983x793). Positions are pixels on the template.
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "punshmentimg", "levelup_bg.png")
+AVATAR_CENTER = (290, 345)
+AVATAR_RADIUS = 130
+NAME_BOX = (125, 518, 460, 576)
+OLD_LEVEL_CENTER = (1507, 375)
+NEW_LEVEL_CENTER = (1798, 375)
+LEVEL_PATCH = (122, 124)
+LEVEL_FONT_SIZE = 84
+PLATE_FILL = (10, 4, 4, 255)
+NAME_PLATE_FILL = (14, 14, 16, 255)
+
+
+def _fit_font(draw, text: str, max_width: int, start_size: int):
+    size = start_size
+    while size > 14:
+        font = _load_font(size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if bbox[2] - bbox[0] <= max_width:
+            return font
+        size -= 2
+    return _load_font(14)
+
+
+def _clean_name(name: str) -> str:
+    """Drop emoji / symbols the font can't render (they show up as empty boxes)."""
+    kept = []
+    for ch in name:
+        if ord(ch) > 0xFFFF or unicodedata.category(ch) in ("So", "Cs", "Cn", "Cf", "Mn", "Me", "Cc"):
+            continue
+        kept.append(ch)
+    cleaned = " ".join("".join(kept).split())
+    return cleaned or "PLAYER"
+
+
+def _draw_level_number(canvas: Image.Image, center: tuple[int, int], level: int):
+    x, y = center
+    font = _load_font(LEVEL_FONT_SIZE)
+    text = str(level)
+
+    # Feathered dark patch so the template's "10"/"11" disappear without a visible disc.
+    pw, ph = LEVEL_PATCH
+    patch = Image.new("L", canvas.size, 0)
+    ImageDraw.Draw(patch).rounded_rectangle((x - pw // 2, y - ph // 2, x + pw // 2, y + ph // 2), radius=24, fill=255)
+    patch = patch.filter(ImageFilter.GaussianBlur(10))
+    canvas.paste(Image.new("RGBA", canvas.size, PLATE_FILL), (0, 0), patch)
+
+    # White -> light grey vertical gradient text, like the template digits.
+    probe = ImageDraw.Draw(canvas)
+    bbox = probe.textbbox((x, y), text, font=font, anchor="mm")
+    mask = Image.new("L", canvas.size, 0)
+    ImageDraw.Draw(mask).text((x, y), text, font=font, fill=255, anchor="mm")
+    gradient = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    gdraw = ImageDraw.Draw(gradient)
+    top, bottom = bbox[1], bbox[3]
+    for row in range(top, bottom + 1):
+        t = (row - top) / max(1, bottom - top)
+        v = int(255 - 70 * t)
+        gdraw.line([(bbox[0], row), (bbox[2], row)], fill=(v, v, v, 255))
+    canvas.paste(gradient, (0, 0), mask)
+
+
 async def build_level_up_card(member, old_level: int, new_level: int, background_url: str = BACKGROUND_URL) -> io.BytesIO:
-    bg_bytes = await _fetch_background(background_url) if background_url else None
     avatar_bytes = await _fetch_avatar(member)
 
-    canvas = _build_canvas(bg_bytes)
+    canvas = Image.open(TEMPLATE_PATH).convert("RGBA")
     draw = ImageDraw.Draw(canvas)
-    _draw_watermark(draw, CARD_SIZE)
 
+    # Avatar inside the circle
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-    avatar_img = _circular_avatar(avatar, 88, 6)
-    ax, ay = 36, (CARD_SIZE[1] - avatar_img.height) // 2
-    _draw_glow_circle(canvas, (ax + avatar_img.width // 2, ay + avatar_img.height // 2), 50, RED)
-    canvas.alpha_composite(avatar_img, (ax, ay))
+    size = AVATAR_RADIUS * 2
+    avatar = ImageOps.fit(avatar, (size, size), method=Image.Resampling.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    canvas.paste(avatar, (AVATAR_CENTER[0] - AVATAR_RADIUS, AVATAR_CENTER[1] - AVATAR_RADIUS), mask)
 
-    name = member.display_name
-    if len(name) > 18:
-        name = name[:16] + "…"
-    name_font = _load_font(100)
-    draw.text((150, CARD_SIZE[1] // 2), name, font=name_font, fill=WHITE, anchor="lm")
+    # Username (covers the "PLAYER NAME" placeholder)
+    left, top, right, bottom = NAME_BOX
+    draw.rounded_rectangle(NAME_BOX, radius=8, fill=NAME_PLATE_FILL)
+    name = _clean_name(member.display_name).upper()
+    name_font = _fit_font(draw, name, right - left - 24, 40)
+    draw.text(((left + right) // 2, (top + bottom) // 2), name, font=name_font, fill=WHITE, anchor="mm")
 
-    old_x = CARD_SIZE[0] - 230
-    arrow_x = CARD_SIZE[0] - 155
-    new_x = CARD_SIZE[0] - 80
-    cy = CARD_SIZE[1] // 2
-
-    _draw_level_badge(canvas, (old_x, cy), old_level)
-    _draw_arrow(canvas, arrow_x, cy)
-    _draw_level_badge(canvas, (new_x, cy), new_level)
+    # Levels (cover the "10" / "11" placeholders)
+    _draw_level_number(canvas, OLD_LEVEL_CENTER, old_level)
+    _draw_level_number(canvas, NEW_LEVEL_CENTER, new_level)
 
     buffer = io.BytesIO()
     canvas.save(buffer, format="PNG")
