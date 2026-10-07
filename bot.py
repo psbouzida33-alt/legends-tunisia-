@@ -1,7 +1,7 @@
 import asyncio
+import bisect
 import io
 import json
-import math
 import os
 import random
 import re
@@ -143,7 +143,10 @@ BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "")
 BOT_BUILD_ID = "2026-07-08-rate-limit-safe"
 
 LEVEL_LOG_CHANNEL_ID = 1517921554510385242
-LEVEL_MINUTES_BASE = 5
+LEVEL_MINUTES_BASE = 5           # levels 1..LEVEL_EASY_CAP: level N costs 5*N min
+LEVEL_EASY_CAP = 15              # up to here the curve is the old gentle one
+LEVEL_100_TARGET_HOURS = 600     # voice hours to hit level 100 (~5 months at ~4h/day)
+LEVEL_HARD_EXPONENT = 1.5        # >1 = each level past the cap costs more than the last
 MAX_VOICE_LEVEL = 1000
 LEVELS_BACKUP_CHANNEL_ID = _env_channel_id(
     "LEVELS_BACKUP_CHANNEL_ID", BOT_CHAT_CHANNEL_ID
@@ -2260,15 +2263,44 @@ async def _restore_warnings_from_discord() -> bool:
     return False
 
 
+def _build_level_thresholds() -> list[int]:
+    """Cumulative voice minutes needed for each level (index = level).
+
+    Levels 1..LEVEL_EASY_CAP follow the old curve (level N costs 5*N min).
+    Past the cap, the cost of level N is
+        LEVEL_MINUTES_BASE*(cap+1) + k*(N-cap)**LEVEL_HARD_EXPONENT
+    with k solved so that level 100 lands exactly on LEVEL_100_TARGET_HOURS.
+    """
+    cap = LEVEL_EASY_CAP
+    hard_base = LEVEL_MINUTES_BASE * (cap + 1)
+    easy_total = LEVEL_MINUTES_BASE * cap * (cap + 1) / 2
+    hard_levels = 100 - cap
+    weight_sum = sum(m ** LEVEL_HARD_EXPONENT for m in range(1, hard_levels + 1))
+    budget = LEVEL_100_TARGET_HOURS * 60 - easy_total - hard_levels * hard_base
+    k = max(0.0, budget / weight_sum)
+
+    thresholds = [0]
+    total = 0.0
+    for n in range(1, MAX_VOICE_LEVEL + 1):
+        if n <= cap:
+            total += LEVEL_MINUTES_BASE * n
+        else:
+            total += hard_base + k * (n - cap) ** LEVEL_HARD_EXPONENT
+        thresholds.append(round(total))
+    return thresholds
+
+
+LEVEL_THRESHOLDS = _build_level_thresholds()
+
+
 def _voice_minutes_for_level(level: int) -> int:
-    return LEVEL_MINUTES_BASE * level * (level + 1) // 2
+    return LEVEL_THRESHOLDS[max(0, min(level, MAX_VOICE_LEVEL))]
 
 
 def _level_from_voice_minutes(minutes: int) -> int:
     if minutes <= 0:
         return 0
-    level = int((-1 + math.sqrt(1 + 8 * minutes / LEVEL_MINUTES_BASE)) // 2)
-    return min(level, MAX_VOICE_LEVEL)
+    return min(bisect.bisect_right(LEVEL_THRESHOLDS, minutes) - 1, MAX_VOICE_LEVEL)
 
 
 def _normalize_user_level_data(raw: dict) -> dict:
