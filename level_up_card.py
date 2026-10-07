@@ -3,7 +3,7 @@ import os
 import unicodedata
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 # Optional: set a custom background URL (same idea as welcome_card.py)
 BACKGROUND_URL = ""
@@ -168,6 +168,45 @@ PLATE_FILL = (10, 4, 4, 255)
 NAME_PLATE_FILL = (14, 14, 16, 255)
 
 
+# Design tiers: (min_level, hue shift 0-255). Red (original) -> other colour themes.
+LEVEL_TIERS = (
+    (0, 0),      # red (original)
+    (5, 150),    # blue
+    (10, 90),    # green
+    (20, 190),   # purple
+    (30, 125),   # cyan
+    (50, 215),   # pink
+    (100, 28),   # gold
+)
+_template_cache: dict[int, Image.Image] = {}
+
+
+def _tier_shift(level: int) -> int:
+    shift = 0
+    for min_level, tier_shift in LEVEL_TIERS:
+        if level >= min_level:
+            shift = tier_shift
+    return shift
+
+
+def _themed_template(level: int) -> Image.Image:
+    shift = _tier_shift(level)
+    cached = _template_cache.get(shift)
+    if cached is None:
+        base = Image.open(TEMPLATE_PATH).convert("RGB")
+        if shift:
+            h, s, v = base.convert("HSV").split()
+            # Only recolour saturated reds; gold logo, whites and darks stay as they are.
+            red = h.point(lambda x: 255 if x <= 14 or x >= 240 else 0)
+            vivid = s.point(lambda x: 255 if x > 90 else 0)
+            mask = ImageChops.multiply(red, vivid).filter(ImageFilter.GaussianBlur(1))
+            shifted = Image.merge("HSV", (h.point(lambda x: (x + shift) % 256), s, v)).convert("RGB")
+            base = Image.composite(shifted, base, mask)
+        cached = base.convert("RGBA")
+        _template_cache[shift] = cached
+    return cached.copy()
+
+
 def _fit_font(draw, text: str, max_width: int, start_size: int):
     size = start_size
     while size > 14:
@@ -220,7 +259,7 @@ def _draw_level_number(canvas: Image.Image, center: tuple[int, int], level: int)
 async def build_level_up_card(member, old_level: int, new_level: int, background_url: str = BACKGROUND_URL) -> io.BytesIO:
     avatar_bytes = await _fetch_avatar(member)
 
-    canvas = Image.open(TEMPLATE_PATH).convert("RGBA")
+    canvas = _themed_template(new_level)
     draw = ImageDraw.Draw(canvas)
 
     # Avatar inside the circle
