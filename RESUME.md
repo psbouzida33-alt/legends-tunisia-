@@ -57,6 +57,7 @@
 | `?setnotifications` | `?mentionsonly`, `?notifmentions` | Notifications serveur → @mentions only. |
 | `/postroles` | — | Poste le menu sélection rôles jeux. (slash uniquement) |
 | `/poststatus` | — | Poste le menu statut Single / Taken (un seul choix). (slash uniquement) |
+| `/postage` | — | Poste le menu âge 18- / 18-25 / 25-35 / 35+ (un seul choix). (slash uniquement) |
 | `?syncroles` | `?syncjoinroles` | Donne les 5 rôles join aux membres (`?syncroles` ou `?syncroles @user`). |
 | `/ticketpanel` | — | Poste le panneau tickets (Support / Report / Bugs). (slash uniquement) |
 | `?moderationpanel` | — | Poste le Moderation Panel (Ban/Timeout/Mute/Warn/...). |
@@ -177,7 +178,11 @@ Jeux configurés : Free Fire, Rust, COD, GTA V, Brawlhalla, CS GO, Fortnite, Val
 
 ## Menu statut Single / Taken (après `/poststatus`)
 
-Panel séparé, un seul choix (Single ou Taken). Config : `STATUS_ROLES` dans `bot.py` — `role_id` à 0 = le rôle est cherché par son nom (`Single` / `Taken`) dans le serveur.
+Panel séparé, un seul choix (Single ou Taken). Config : `STATUS_ROLES` dans `bot.py` (emoji + `role_id` par option).
+
+## Menu âge (après `/postage`)
+
+Panel séparé, un seul choix : 18-, 18-25, 25-35, 35+ (même emoji `age` pour tous). Config : `AGE_ROLES` dans `bot.py`. Même logique que le menu statut (`SingleChoiceRoleSelect`) : choisir un rôle retire les autres, désélectionner retire le rôle.
 
 ---
 
