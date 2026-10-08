@@ -1456,17 +1456,28 @@ async def _register_existing_ticket_channels(guild: discord.Guild):
 
 # Game roles — replace role_id with real Discord role IDs (Developer mode → copy ID)
 # Set role_id to 0 to skip a game until you add the ID.
+GAME_EMOJI_FREE_FIRE = discord.PartialEmoji(name="images", id=1557720897815847012)
+GAME_EMOJI_RUST = discord.PartialEmoji(name="50406", id=1519076379709145200)
+GAME_EMOJI_COD = discord.PartialEmoji(name="50407", id=1519076378195005510)
+GAME_EMOJI_BRAWLHALLA = discord.PartialEmoji(name="9133brawlhallagame", id=1557720773295345714)
+GAME_EMOJI_CSGO = discord.PartialEmoji(name="50411", id=1519077036306599997)
+GAME_EMOJI_FORTNITE = discord.PartialEmoji(name="224588fortnite", id=1557720910637703249)
+GAME_EMOJI_VALORANT = discord.PartialEmoji(name="50413", id=1519077791759335504)
+GAME_EMOJI_LOL = discord.PartialEmoji(name="50414", id=1519078256836346087)
+GAME_EMOJI_MINECRAFT = discord.PartialEmoji(name="50415", id=1519078254689124682)
+
 GAME_ROLES = [
-    {"label": "Free Fire", "role_id": 1518285374068232273, "emoji": "🔥", "description": "Click to select Free Fire"},
-    {"label": "Rust", "role_id": 1518285498903166986, "emoji": "🛠️", "description": "Click to select Rust"},
-    {"label": "Call of duty", "role_id": 1518285558089121842, "emoji": "🎯", "description": "Click to select Call of duty"},
+    {"label": "Free Fire", "role_id": 1518285374068232273, "emoji": GAME_EMOJI_FREE_FIRE, "description": "Click to select Free Fire"},
+    {"label": "Rust", "role_id": 1518285498903166986, "emoji": GAME_EMOJI_RUST, "description": "Click to select Rust"},
+    {"label": "Call of duty", "role_id": 1518285558089121842, "emoji": GAME_EMOJI_COD, "description": "Click to select Call of duty"},
+    # GTA V: no custom emoji in the Developer Portal yet — upload one and swap the 🚗 for a PartialEmoji.
     {"label": "GTA V", "role_id": 1518285631657082932, "emoji": "🚗", "description": "Click to select GTA V"},
-    {"label": "Brawlhalla", "role_id": 1518286791382274211, "emoji": "⚔️", "description": "Click to select Brawlhalla"},
-    {"label": "CS GO", "role_id": 1518286667360763914, "emoji": "💣", "description": "Click to select CS GO"},
-    {"label": "Fortnite", "role_id": 1518286698277240912, "emoji": "🏝️", "description": "Click to select Fortnite"},
-    {"label": "Valorant", "role_id": 1518270987882201168, "emoji": "🎮", "description": "Click to select Valorant"},
-    {"label": "League of Legends", "role_id": 1518285800201257031, "emoji": "🧙", "description": "Click to select League of Legends"},
-    {"label": "Minecraft", "role_id": 1518285836532056286, "emoji": "⛏️", "description": "Click to select Minecraft"},
+    {"label": "Brawlhalla", "role_id": 1518286791382274211, "emoji": GAME_EMOJI_BRAWLHALLA, "description": "Click to select Brawlhalla"},
+    {"label": "CS GO", "role_id": 1518286667360763914, "emoji": GAME_EMOJI_CSGO, "description": "Click to select CS GO"},
+    {"label": "Fortnite", "role_id": 1518286698277240912, "emoji": GAME_EMOJI_FORTNITE, "description": "Click to select Fortnite"},
+    {"label": "Valorant", "role_id": 1518270987882201168, "emoji": GAME_EMOJI_VALORANT, "description": "Click to select Valorant"},
+    {"label": "League of Legends", "role_id": 1518285800201257031, "emoji": GAME_EMOJI_LOL, "description": "Click to select League of Legends"},
+    {"label": "Minecraft", "role_id": 1518285836532056286, "emoji": GAME_EMOJI_MINECRAFT, "description": "Click to select Minecraft"},
 ]
 
 
