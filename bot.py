@@ -1490,8 +1490,8 @@ STATUS_EMOJI_TAKEN = discord.PartialEmoji(name="516754lovereact", id=15577253550
 
 # Relationship status roles (pick one). role_id 0 = look the role up by its label in the server.
 STATUS_ROLES = [
-    {"key": "single", "label": "Single", "role_id": 0, "emoji": STATUS_EMOJI_SINGLE, "description": "Click if you're single"},
-    {"key": "taken", "label": "Taken", "role_id": 0, "emoji": STATUS_EMOJI_TAKEN, "description": "Click if you're taken"},
+    {"key": "single", "label": "Single", "role_id": 1557728890841993367, "emoji": STATUS_EMOJI_SINGLE, "description": "Click if you're single"},
+    {"key": "taken", "label": "Taken", "role_id": 1557729284326686780, "emoji": STATUS_EMOJI_TAKEN, "description": "Click if you're taken"},
 ]
 
 
