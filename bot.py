@@ -1485,6 +1485,23 @@ def _active_game_roles():
     return [g for g in GAME_ROLES if g.get("role_id", 0)]
 
 
+STATUS_EMOJI_SINGLE = discord.PartialEmoji(name="2654heartbroken", id=1557725372001558578)
+STATUS_EMOJI_TAKEN = discord.PartialEmoji(name="516754lovereact", id=1557725355027206155)
+
+# Relationship status roles (pick one). role_id 0 = look the role up by its label in the server.
+STATUS_ROLES = [
+    {"key": "single", "label": "Single", "role_id": 0, "emoji": STATUS_EMOJI_SINGLE, "description": "Click if you're single"},
+    {"key": "taken", "label": "Taken", "role_id": 0, "emoji": STATUS_EMOJI_TAKEN, "description": "Click if you're taken"},
+]
+
+
+def _resolve_status_role(guild, status):
+    if status.get("role_id"):
+        return guild.get_role(status["role_id"])
+    wanted = status["label"].casefold()
+    return discord.utils.find(lambda r: r.name.casefold() == wanted, guild.roles)
+
+
 class TransferOwnerSelect(discord.ui.Select):
     def __init__(self, channel, owner_id: int):
         self.channel = channel
@@ -1938,6 +1955,72 @@ class GameRolePickerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(GameRoleSelect())
+
+
+class StatusRoleSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label=s["label"],
+                value=s["key"],
+                description=s["description"],
+                emoji=s["emoji"],
+            )
+            for s in STATUS_ROLES
+        ]
+        super().__init__(
+            placeholder="Select your status",
+            min_values=0,
+            max_values=1,
+            options=options,
+            custom_id="legends_status_role_picker",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        member = interaction.user
+        guild = interaction.guild
+        status_roles = {s["key"]: _resolve_status_role(guild, s) for s in STATUS_ROLES}
+
+        selected = self.values[0] if self.values else None
+        chosen = status_roles.get(selected)
+        if selected and chosen is None:
+            return await interaction.followup.send(
+                "This status role doesn't exist yet. Ask an admin to create it.",
+                ephemeral=True,
+            )
+
+        to_remove = [r for key, r in status_roles.items() if r and key != selected and r in member.roles]
+        to_add = [chosen] if chosen and chosen not in member.roles else []
+
+        try:
+            if to_remove:
+                await member.remove_roles(*to_remove, reason="Status role picker")
+            if to_add:
+                await member.add_roles(*to_add, reason="Status role picker")
+        except discord.Forbidden:
+            return await interaction.followup.send(
+                "I cannot assign these roles. Move my bot role **above** the status roles.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(
+                f"Could not update your status right now. Try again in a moment. ({exc.text})",
+                ephemeral=True,
+            )
+
+        if chosen:
+            msg = f"Status updated: **{chosen.name}**"
+        else:
+            msg = "Status removed."
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+class StatusRolePickerView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(StatusRoleSelect())
 
 
 class TicketOpenButton(discord.ui.Button):
@@ -2880,6 +2963,7 @@ async def on_ready():
             print(f"Temp room startup cleanup failed for {guild.name}: {e}")
 
     bot.add_view(GameRolePickerView())
+    bot.add_view(StatusRolePickerView())
     bot.add_view(TicketPanelView())
     bot.add_view(PunishmentPanelView())
     bot.add_view(AdminPanelView())
@@ -3401,6 +3485,28 @@ async def slash_postroles(interaction: discord.Interaction):
     )
     await interaction.channel.send(embed=embed, view=GameRolePickerView())
     await interaction.response.send_message("✅ Role picker posted.", ephemeral=True)
+
+
+@bot.tree.command(name="poststatus", description="Post the Single / Taken status picker menu (admin only)")
+async def slash_poststatus(interaction: discord.Interaction):
+    if not await _slash_manage_guild_gate(interaction):
+        return
+
+    lines = "\n".join(f"{s['emoji']} @{s['label']}" for s in STATUS_ROLES)
+    embed = discord.Embed(
+        title="Select your status",
+        description=(
+            "Choose your status below. The bot will assign the matching role automatically.\n\n"
+            f"{lines}\n\n"
+            "You can only pick **one** status."
+        ),
+        color=discord.Color.purple(),
+    )
+    await interaction.channel.send(embed=embed, view=StatusRolePickerView())
+
+    missing = [s["label"] for s in STATUS_ROLES if _resolve_status_role(interaction.guild, s) is None]
+    note = f"\n⚠️ Role not found in this server: **{', '.join(missing)}** — create it (same name) or set `role_id` in STATUS_ROLES." if missing else ""
+    await interaction.response.send_message(f"✅ Status picker posted.{note}", ephemeral=True)
 
 
 @bot.command(name="syncroles", aliases=["syncjoinroles"])
