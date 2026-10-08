@@ -56,6 +56,7 @@
 | `?checkticketcategory` | — | Vérifie la catégorie tickets. |
 | `?setnotifications` | `?mentionsonly`, `?notifmentions` | Notifications serveur → @mentions only. |
 | `/postroles` | — | Poste le menu sélection rôles jeux. (slash uniquement) |
+| `/poststatus` | — | Poste le menu statut Single / Taken (un seul choix). (slash uniquement) |
 | `?syncroles` | `?syncjoinroles` | Donne les 5 rôles join aux membres (`?syncroles` ou `?syncroles @user`). |
 | `/ticketpanel` | — | Poste le panneau tickets (Support / Report / Bugs). (slash uniquement) |
 | `?moderationpanel` | — | Poste le Moderation Panel (Ban/Timeout/Mute/Warn/...). |
@@ -173,6 +174,10 @@ Jeux configurés : Free Fire, Rust, COD, GTA V, Brawlhalla, CS GO, Fortnite, Val
 | Sélection multiple | Menu déroulant — plusieurs jeux. |
 | Mise à jour auto | Retire anciens rôles jeux, ajoute les nouveaux. |
 | Désélection totale | Retire tous les rôles jeux. |
+
+## Menu statut Single / Taken (après `/poststatus`)
+
+Panel séparé, un seul choix (Single ou Taken). Config : `STATUS_ROLES` dans `bot.py` — `role_id` à 0 = le rôle est cherché par son nom (`Single` / `Taken`) dans le serveur.
 
 ---
 
