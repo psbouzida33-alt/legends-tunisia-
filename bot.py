@@ -1013,20 +1013,6 @@ async def _queue_room_rename(channel, typed_name: str) -> tuple[str, bool]:
     return final, current is not None and current.name == final
 
 
-def _room_mark_note(channel_id: int, mark: str) -> str:
-    """Sentence for the lock/unlock reply about the ✓/✘ in the room name."""
-    if room_kinds.get(channel_id) != "lounge":
-        return ""
-    wait = _room_name_wait_seconds(channel_id)
-    if wait > 0:
-        mins = max(1, int((wait + 59) // 60))
-        return (
-            f" ⏳ Discord limits room renames (2 per 10 min) — the **{mark}** in the room name "
-            f"will update in ~{mins} min."
-        )
-    return f" The room name will end with **{mark}**."
-
-
 async def _set_room_locked(channel, *, locked: bool):
     """Lock = @everyone + Boy/Girl cannot connect; Staff + room owner can."""
     guild = channel.guild
@@ -2267,8 +2253,7 @@ class ControlPanelView(discord.ui.View):
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"Could not lock the room. ({exc.text})", ephemeral=True)
         await interaction.followup.send(
-            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect."
-            + _room_mark_note(channel.id, "✘"),
+            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect.",
             ephemeral=True,
         )
 
@@ -2285,7 +2270,7 @@ class ControlPanelView(discord.ui.View):
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"Could not unlock the room. ({exc.text})", ephemeral=True)
         await interaction.followup.send(
-            "Room unlocked — others can join again." + _room_mark_note(channel.id, "✓"),
+            "Room unlocked — others can join again.",
             ephemeral=True,
         )
 
@@ -2752,6 +2737,13 @@ async def _cleanup_and_register_temp_rooms(guild):
                 owners[voice_channel.id] = owner.id
             room_kinds[voice_channel.id] = kind
             room_nsfw_enabled[voice_channel.id] = voice_channel.name.startswith(NSFW_ROOM_NAME_PREFIX)
+            # The panel buttons only work while their view is registered with the bot. That happens
+            # when a room is created, so after every restart/redeploy the panels of rooms that already
+            # exist were dead ("This interaction failed") — register them again.
+            try:
+                bot.add_view(ControlPanelView(voice_channel.id, emojis=_get_panel_emojis(guild)))
+            except Exception as exc:
+                print(f"Could not re-register the control panel of {voice_channel.name}: {exc}")
             if kind == "lounge":
                 # The name carries the lock state (✘ = locked), so restore it after a restart.
                 if voice_channel.name.rstrip().endswith(LOUNGE_ROOM_LOCKED_SUFFIX):
@@ -5828,6 +5820,19 @@ async def on_guild_channel_update(before, after):
         _schedule_room_name_sync(after.id)
 
 
+@bot.listen("on_voice_state_update")
+async def voice_nick_listener(member, before, after):
+    """Everyone entering a join-to-create room wears its emoji; leaving the room removes it.
+
+    A listener of its own, not part of the main handler below: the nickname must never wait for
+    (or be lost to) the rest of that handler, which can be slow (staff DMs) or fail.
+    """
+    try:
+        await _update_voice_nick_for_state_change(member, before, after)
+    except Exception as exc:
+        print(f"Voice emoji listener error for {member}: {exc}")
+
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     guild = member.guild
@@ -5890,9 +5895,6 @@ async def on_voice_state_update(member, before, after):
             before.channel,
             reason="Empty temp voice room cleanup",
         )
-
-    # Everyone entering a join-to-create room wears its emoji; leaving the room removes it.
-    await _update_voice_nick_for_state_change(member, before, after)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):

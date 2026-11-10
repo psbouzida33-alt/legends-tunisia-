@@ -44,6 +44,7 @@
 
 - Room **supprimée** quand tout le monde quitte.
 - Owner part + autres restent → **60 s** puis transfer aléatoire (lounge).
+- **Panneau après redémarrage** : au démarrage, le bot ré-enregistre les boutons du panneau des rooms déjà ouvertes (sinon « This interaction failed » après chaque redéploiement).
 - **Emoji de room** : chaque room créée via un hub reçoit un emoji aléatoire (`ROOM_EMOJIS`, ~125). Tous ceux qui entrent dans la room (owner + invités) ont l'emoji des deux côtés de leur pseudo (`🔥 Pseudo 🔥`) ; le nom de la room lounge utilise le même emoji. Dès qu'ils quittent la room, le pseudo redevient normal. Quand quelqu'un passe par le hub depuis une autre room, l'ancien emoji est retiré **avant** la création de la nouvelle room (jamais d'emojis empilés). Après un redéploiement (Render Free = pas de disque persistant), l'emoji de la room et les pseudos sont relus depuis le nom de la room (`🔥\|Nom ✓`) et le pseudo (`🔥 Pseudo 🔥`). Nécessite **Manage Nicknames** + rôle du bot au-dessus du membre (impossible sur l'owner du serveur). État sauvegardé dans `data/voice_nick_emojis.json` pour nettoyer après un redémarrage.
 - Diagnostic admin : `?checkjoincreate`
 
