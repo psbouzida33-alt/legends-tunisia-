@@ -325,6 +325,7 @@ active_giveaways: dict[int, asyncio.Event] = {}
 chat_mute_expiry_tasks: dict[int, asyncio.Task] = {}
 current_giveaway_view = None
 
+# Old lounge room emojis — still recognised in existing room names (new rooms use ROOM_EMOJIS).
 LOUNGE_ROOM_EMOJIS = [
     "🎙️", "🍘", "🍡", "⚡", "🌪️", "🍁", "🎃", "🍩", "🍫", "🌹", "🍧", "🍜", "🍛", "🍝", "🗽",
 ]
@@ -333,8 +334,8 @@ LOUNGE_ROOM_NAME_SUFFIX = " ✓"
 NSFW_ROOM_NAME_PREFIX = "🔞"
 
 
-def format_lounge_room_name(member_name: str) -> str:
-    emoji = random.choice(LOUNGE_ROOM_EMOJIS)
+def format_lounge_room_name(member_name: str, emoji: str | None = None) -> str:
+    emoji = emoji or random.choice(ROOM_EMOJIS)
     return f"{emoji}|{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
 
 
@@ -395,21 +396,38 @@ async def _notify_join_create_failure(member: discord.Member, message: str) -> N
         print(f"Join-to-create failure DM to {member.id} failed: {exc}")
 
 
-# Random emoji put on the left of a member's nickname while they are in voice
-# after using a join-to-create hub. Removed again when they leave voice.
-VOICE_NICK_EMOJIS = [
-    "🎧", "🎤", "🎵", "🎶", "🎼", "🎹", "🎸", "🎮", "🕹️", "🎯",
-    "👑", "💎", "🔥", "⚡", "🌟", "✨", "💫", "🌙", "☀️", "🌈",
-    "🦋", "🦄", "🐉", "🐺", "🦊", "🐼", "🐸", "🦁", "🦈", "🦅",
-    "💜", "💙", "❤️", "🖤", "🤍", "💚", "💛", "🧡", "🤎",
-    "🚀", "🛸", "👾", "🤖", "🎭", "🎪", "🎲", "🏆", "🥇", "🍀",
+# One random emoji per join-to-create room (picked from this list when the room is
+# created). Everyone inside the room wears it on both sides of their nickname
+# ("🔥 Name 🔥") and it is also used in the lounge room name. When a member leaves
+# the room, their nickname goes back to normal.
+ROOM_EMOJIS = [
+    "🔥", "⚡", "💥", "☄️", "🌋", "✨", "💫", "🌟",
+    "🌙", "🌑", "🌕", "🪐", "🚀", "👽", "🛸", "⭐",
+    "👑", "💎", "💍", "🏆", "🥇", "💰", "🤑", "🪙",
+    "🌸", "🌺", "🌻", "🌹", "🌷", "🍀", "🌴", "🍁",
+    "🍄", "🌿", "🌵", "🌼", "🪷", "🌳", "🐉", "🐲",
+    "🦋", "🦇", "🐺", "🦊", "🐼", "🐸", "🐍", "🦈",
+    "🐬", "🦁", "🐯", "🐻", "🦄", "🐧", "🎮", "🕹️",
+    "👾", "🎯", "🏹", "⚔️", "🛡️", "🎲", "❤️", "🧡",
+    "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "🩷",
+    "🩵", "💖", "💗", "💓", "💝", "🎧", "🎵", "🎶",
+    "🎼", "🎤", "🎹", "🎸", "🥁", "🌈", "🌪️", "❄️",
+    "☀️", "🌧️", "⛈️", "🌊", "🌬️", "🍓", "🍒", "🍉",
+    "🍇", "🍍", "🥑", "🍕", "🍭", "♠️", "♥️", "♦️",
+    "♣️", "🔮", "🧿", "☯️", "♾️", "🎭", "🎪", "🎡",
+    "🎆", "🎇", "🪄", "🧸", "🎀", "🪽", "🪼", "🦚",
+    "🪸", "🧩", "🔱", "💠", "🔔",
 ]
 VOICE_NICK_MAX_LEN = 32  # Discord nickname limit (UTF-16 units)
 VOICE_NICK_FILE = DATA_DIR / "voice_nick_emojis.json"
-# member_id -> {"guild_id": int, "emoji": str, "original": str | None}
-# "original" is the server nickname before the emoji (None = had no nickname).
+# member_id -> {"guild_id": int, "emoji": str, "nick": str, "original": str | None}
+# "original" is the server nickname before the emoji (None = had no nickname),
+# "nick" is the exact nickname the bot set.
 voice_nick_state: dict[int, dict] = {}
+# temp room channel_id -> the emoji of that room
+room_emojis: dict[int, str] = {}
 _voice_nick_locks: dict[int, asyncio.Lock] = {}
+_voice_nick_skip_logged: set[int] = set()
 
 
 def _truncate_utf16(text: str, limit: int) -> str:
@@ -424,32 +442,53 @@ def _truncate_utf16(text: str, limit: int) -> str:
     return "".join(out)
 
 
-def _load_voice_nick_state() -> None:
+def _voice_nick_text(emoji: str, base: str) -> str:
+    """'🔥 Name 🔥' — the name is cut so the whole nickname fits Discord's limit."""
+    emoji_len = len(emoji.encode("utf-16-le")) // 2
+    available = max(1, VOICE_NICK_MAX_LEN - emoji_len * 2 - 2)
+    name = _truncate_utf16(base, available).rstrip() or "?"
+    return f"{emoji} {name} {emoji}"
+
+
+def _load_voice_emoji_state() -> None:
     voice_nick_state.clear()
+    room_emojis.clear()
     if not VOICE_NICK_FILE.is_file():
         return
     try:
         with open(VOICE_NICK_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        for key, value in raw.items():
+        if "members" in raw or "rooms" in raw:
+            members, rooms = raw.get("members", {}), raw.get("rooms", {})
+        else:  # first version of the file: only members, no rooms
+            members, rooms = raw, {}
+        for key, value in members.items():
             voice_nick_state[int(key)] = {
                 "guild_id": int(value["guild_id"]),
                 "emoji": str(value["emoji"]),
+                "nick": value.get("nick"),
                 "original": value.get("original"),
             }
-        print(f"Loaded {len(voice_nick_state)} voice-emoji nickname record(s).")
+        for key, value in rooms.items():
+            room_emojis[int(key)] = str(value)
+        print(f"Loaded {len(voice_nick_state)} voice-emoji nickname record(s), {len(room_emojis)} room emoji(s).")
     except Exception as exc:
-        print(f"Could not load voice-emoji nickname state: {exc}")
+        print(f"Could not load voice-emoji state: {exc}")
         voice_nick_state.clear()
+        room_emojis.clear()
 
 
-def _save_voice_nick_state() -> None:
+def _save_voice_emoji_state() -> None:
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "members": {str(k): v for k, v in voice_nick_state.items()},
+            "rooms": {str(k): v for k, v in room_emojis.items()},
+        }
         with open(VOICE_NICK_FILE, "w", encoding="utf-8") as f:
-            json.dump({str(k): v for k, v in voice_nick_state.items()}, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as exc:
-        print(f"Voice-emoji nickname state save failed: {exc}")
+        print(f"Voice-emoji state save failed: {exc}")
 
 
 def _can_edit_member_nick(member: discord.Member) -> bool:
@@ -462,58 +501,72 @@ def _can_edit_member_nick(member: discord.Member) -> bool:
     return member.top_role < me.top_role
 
 
-def _member_in_voice(guild: discord.Guild, member_id: int) -> bool:
+def _member_room_emoji(guild: discord.Guild, member_id: int) -> str | None:
+    """Emoji of the temp room the member is in right now (None if not in one)."""
     member = guild.get_member(member_id)
-    return member is not None and member.voice is not None and member.voice.channel is not None
+    if member is None or member.voice is None or member.voice.channel is None:
+        return None
+    return room_emojis.get(member.voice.channel.id)
+
+
+def _nick_is_ours(state: dict, current: str | None) -> bool:
+    """True if the member's nickname is still the one the bot set (cache may lag a bit)."""
+    nick_set = state.get("nick")
+    if current == nick_set or current == state.get("original"):
+        return True
+    return nick_set is None and bool(current) and current.startswith(f"{state['emoji']} ")
 
 
 async def _restore_voice_nick(guild: discord.Guild, member_id: int) -> None:
-    """Remove the voice emoji from a member's nickname (caller holds the member lock)."""
+    """Put the member's normal nickname back (caller holds the member lock)."""
     state = voice_nick_state.get(member_id)
     if state is None:
         return
     member = guild.get_member(member_id)
-    if member is not None:
-        prefix = f"{state['emoji']} "
-        # Only touch the nickname if it still carries our emoji (do not undo a manual rename).
-        if member.nick and member.nick.startswith(prefix) and _can_edit_member_nick(member):
-            original = state.get("original")
-            try:
-                await _api_call_with_retry(
-                    lambda: member.edit(nick=original, reason="Left voice — remove join-to-create emoji"),
-                    label=f"Voice emoji nickname restore for {member_id}",
-                )
-            except discord.Forbidden:
-                print(f"Voice emoji restore forbidden for {member} (Manage Nicknames / role hierarchy).")
-            except discord.HTTPException as exc:
-                print(f"Voice emoji restore failed for {member}: {exc}")
+    # Only touch the nickname if it is still ours (do not undo a manual rename).
+    if member is not None and _nick_is_ours(state, member.nick) and _can_edit_member_nick(member):
+        original = state.get("original")
+        try:
+            await _api_call_with_retry(
+                lambda: member.edit(nick=original, reason="Left the join-to-create room"),
+                label=f"Voice emoji nickname restore for {member_id}",
+            )
+        except discord.Forbidden:
+            print(f"Voice emoji restore forbidden for {member} (Manage Nicknames / role hierarchy).")
+        except discord.HTTPException as exc:
+            print(f"Voice emoji restore failed for {member}: {exc}")
     voice_nick_state.pop(member_id, None)
-    _save_voice_nick_state()
+    _save_voice_emoji_state()
 
 
-async def _apply_voice_nick_emoji(member: discord.Member) -> None:
-    """Put a random emoji on the left of the member's nickname. Never raises."""
+async def _apply_voice_nick_emoji(member: discord.Member, emoji: str) -> None:
+    """Show the room emoji on both sides of the member's nickname. Never raises."""
     if member.bot:
         return
     lock = _voice_nick_locks.setdefault(member.id, asyncio.Lock())
     try:
         async with lock:
-            if member.id in voice_nick_state:
-                return
+            state = voice_nick_state.get(member.id)
+            current = member.nick
+            if state is not None and _nick_is_ours(state, current):
+                if state["emoji"] == emoji and current == state.get("nick"):
+                    return  # already wearing this room's emoji
+                original = state.get("original")  # moved to another room: keep the real original
+            else:
+                original = current  # first time, or they renamed themselves meanwhile
             if not _can_edit_member_nick(member):
-                print(
-                    f"Voice emoji skipped for {member}: bot cannot edit this nickname "
-                    "(needs Manage Nicknames, role above the member, member is not the owner)."
-                )
+                if member.id not in _voice_nick_skip_logged:
+                    _voice_nick_skip_logged.add(member.id)
+                    print(
+                        f"Voice emoji skipped for {member}: bot cannot edit this nickname "
+                        "(needs Manage Nicknames, role above the member, member is not the owner)."
+                    )
                 return
-            emoji = random.choice(VOICE_NICK_EMOJIS)
-            prefix = f"{emoji} "
-            base = _truncate_utf16(member.display_name, VOICE_NICK_MAX_LEN - len(prefix.encode("utf-16-le")) // 2)
-            new_nick = f"{prefix}{base}"
-            original = member.nick
+            base = original or member.global_name or member.name
+            new_nick = _voice_nick_text(emoji, base)
             try:
                 await _api_call_with_retry(
-                    lambda: member.edit(nick=new_nick, reason="Join-to-create voice emoji"),
+                    lambda: member.edit(nick=new_nick, reason="Joined a join-to-create room"),
                     label=f"Voice emoji nickname for {member.id}",
                 )
             except discord.Forbidden:
@@ -525,18 +578,19 @@ async def _apply_voice_nick_emoji(member: discord.Member) -> None:
             voice_nick_state[member.id] = {
                 "guild_id": member.guild.id,
                 "emoji": emoji,
+                "nick": new_nick,
                 "original": original,
             }
-            _save_voice_nick_state()
-            # They may have left voice while the edit was in flight — undo right away.
-            if not _member_in_voice(member.guild, member.id):
+            _save_voice_emoji_state()
+            # They may have left the room while the edit was in flight — undo right away.
+            if _member_room_emoji(member.guild, member.id) is None:
                 await _restore_voice_nick(member.guild, member.id)
     except Exception as exc:
         print(f"Voice emoji apply unexpected error for {member}: {exc}")
 
 
 async def _remove_voice_nick_emoji(guild: discord.Guild, member_id: int) -> None:
-    """Restore the member's normal nickname after they left voice. Never raises."""
+    """Restore the member's normal nickname. Never raises."""
     if member_id not in voice_nick_state:
         return
     lock = _voice_nick_locks.setdefault(member_id, asyncio.Lock())
@@ -547,12 +601,34 @@ async def _remove_voice_nick_emoji(guild: discord.Guild, member_id: int) -> None
         print(f"Voice emoji remove unexpected error for {member_id}: {exc}")
 
 
+async def _update_voice_nick_for_state_change(member: discord.Member, before, after) -> None:
+    """Called on every voice state change: wear the room emoji inside a room, drop it outside."""
+    if member.bot or before.channel == after.channel:
+        return
+    emoji = room_emojis.get(after.channel.id) if after.channel is not None else None
+    if emoji:
+        await _apply_voice_nick_emoji(member, emoji)
+        return
+    if (
+        after.channel is not None
+        and after.channel.id in JOIN_TO_CREATE_CHANNELS
+        and member.id in voice_nick_state
+    ):
+        return  # about to be moved into a brand-new room — keep the nickname, no flicker
+    await _remove_voice_nick_emoji(member.guild, member.id)
+
+
 async def _sync_voice_nick_emojis(guild: discord.Guild) -> None:
-    """On startup: clean emojis left behind for members who are no longer in voice."""
+    """On startup: forget rooms that no longer exist and clean emojis left behind."""
+    stale_rooms = [room_id for room_id in room_emojis if bot.get_channel(room_id) is None]
+    for room_id in stale_rooms:
+        room_emojis.pop(room_id, None)
+    if stale_rooms:
+        _save_voice_emoji_state()
     for member_id, state in list(voice_nick_state.items()):
         if state["guild_id"] != guild.id:
             continue
-        if not _member_in_voice(guild, member_id):
+        if _member_room_emoji(guild, member_id) is None:
             await _remove_voice_nick_emoji(guild, member_id)
 
 
@@ -636,8 +712,9 @@ async def _create_join_to_create_room(member, trigger_channel):
             read_message_history=True,
         )
 
+        room_emoji = random.choice(ROOM_EMOJIS)
         if config["kind"] == "lounge":
-            channel_name = format_lounge_room_name(member.display_name)
+            channel_name = format_lounge_room_name(member.display_name, room_emoji)
         else:
             channel_name = config["name"].format(member=member.display_name)
 
@@ -655,6 +732,8 @@ async def _create_join_to_create_room(member, trigger_channel):
         owners[new_channel.id] = member.id
         room_kinds[new_channel.id] = config["kind"]
         room_nsfw_enabled[new_channel.id] = False
+        room_emojis[new_channel.id] = room_emoji
+        _save_voice_emoji_state()
 
         try:
             await member.move_to(new_channel)
@@ -668,8 +747,8 @@ async def _create_join_to_create_room(member, trigger_channel):
                 ),
             )
 
-        await _apply_voice_nick_emoji(member)
-
+        # The nickname emoji is applied by on_voice_state_update once the member
+        # lands in the new room (see _update_voice_nick_for_state_change).
         await _send_room_control_panel(new_channel, member, kind=config["kind"])
     except discord.Forbidden as exc:
         print(f"Join-to-create forbidden for {member} in {trigger_channel.name}: {exc}")
@@ -2249,9 +2328,12 @@ class TicketCloseView(discord.ui.View):
 _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 
+_LOUNGE_NAME_EMOJIS = tuple(dict.fromkeys([*LOUNGE_ROOM_EMOJIS, *ROOM_EMOJIS]))
+
+
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
     name = _strip_nsfw_room_prefix(channel_name)
-    if any(name.startswith(f"{emoji}|") for emoji in LOUNGE_ROOM_EMOJIS) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
+    if any(name.startswith(f"{emoji}|") for emoji in _LOUNGE_NAME_EMOJIS) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
         return "lounge"
     if name.endswith("'s Lounge"):
         return "lounge"
@@ -2272,6 +2354,8 @@ def _clear_temp_room_tracking(channel_id: int):
     room_kinds.pop(channel_id, None)
     room_nsfw_enabled.pop(channel_id, None)
     locked_rooms.discard(channel_id)
+    if room_emojis.pop(channel_id, None) is not None:
+        _save_voice_emoji_state()
 
 
 def _infer_room_owner(channel: discord.VoiceChannel) -> discord.Member | None:
@@ -3134,7 +3218,7 @@ async def on_ready():
             print(f"Failed to join static channel: {e}")
 
     _start_background_tasks()
-    _load_voice_nick_state()
+    _load_voice_emoji_state()
     for guild in bot.guilds:
         try:
             await _cleanup_and_register_temp_rooms(guild)
@@ -5476,9 +5560,8 @@ async def on_voice_state_update(member, before, after):
             reason="Empty temp voice room cleanup",
         )
 
-    # Left voice completely → take the join-to-create emoji off their nickname.
-    if not member.bot and before.channel is not None and after.channel is None:
-        await _remove_voice_nick_emoji(guild, member.id)
+    # Everyone entering a join-to-create room wears its emoji; leaving the room removes it.
+    await _update_voice_nick_for_state_change(member, before, after)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
