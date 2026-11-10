@@ -44,6 +44,7 @@
 
 - Room **supprimée** quand tout le monde quitte.
 - Owner part + autres restent → **60 s** puis transfer aléatoire (lounge).
+- **Emoji pseudo** : quand quelqu'un crée une room via un hub, le bot ajoute un emoji aléatoire (`VOICE_NICK_EMOJIS`) à gauche de son pseudo (`🔥 Pseudo`). Dès qu'il quitte complètement le vocal, le pseudo redevient normal. Nécessite **Manage Nicknames** + rôle du bot au-dessus du membre (impossible sur l'owner du serveur). État sauvegardé dans `data/voice_nick_emojis.json` pour nettoyer après un redémarrage.
 - Diagnostic admin : `?checkjoincreate`
 
 ---

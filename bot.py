@@ -395,6 +395,167 @@ async def _notify_join_create_failure(member: discord.Member, message: str) -> N
         print(f"Join-to-create failure DM to {member.id} failed: {exc}")
 
 
+# Random emoji put on the left of a member's nickname while they are in voice
+# after using a join-to-create hub. Removed again when they leave voice.
+VOICE_NICK_EMOJIS = [
+    "🎧", "🎤", "🎵", "🎶", "🎼", "🎹", "🎸", "🎮", "🕹️", "🎯",
+    "👑", "💎", "🔥", "⚡", "🌟", "✨", "💫", "🌙", "☀️", "🌈",
+    "🦋", "🦄", "🐉", "🐺", "🦊", "🐼", "🐸", "🦁", "🦈", "🦅",
+    "💜", "💙", "❤️", "🖤", "🤍", "💚", "💛", "🧡", "🤎",
+    "🚀", "🛸", "👾", "🤖", "🎭", "🎪", "🎲", "🏆", "🥇", "🍀",
+]
+VOICE_NICK_MAX_LEN = 32  # Discord nickname limit (UTF-16 units)
+VOICE_NICK_FILE = DATA_DIR / "voice_nick_emojis.json"
+# member_id -> {"guild_id": int, "emoji": str, "original": str | None}
+# "original" is the server nickname before the emoji (None = had no nickname).
+voice_nick_state: dict[int, dict] = {}
+_voice_nick_locks: dict[int, asyncio.Lock] = {}
+
+
+def _truncate_utf16(text: str, limit: int) -> str:
+    out = []
+    used = 0
+    for ch in text:
+        size = 2 if ord(ch) > 0xFFFF else 1
+        if used + size > limit:
+            break
+        out.append(ch)
+        used += size
+    return "".join(out)
+
+
+def _load_voice_nick_state() -> None:
+    voice_nick_state.clear()
+    if not VOICE_NICK_FILE.is_file():
+        return
+    try:
+        with open(VOICE_NICK_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for key, value in raw.items():
+            voice_nick_state[int(key)] = {
+                "guild_id": int(value["guild_id"]),
+                "emoji": str(value["emoji"]),
+                "original": value.get("original"),
+            }
+        print(f"Loaded {len(voice_nick_state)} voice-emoji nickname record(s).")
+    except Exception as exc:
+        print(f"Could not load voice-emoji nickname state: {exc}")
+        voice_nick_state.clear()
+
+
+def _save_voice_nick_state() -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(VOICE_NICK_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in voice_nick_state.items()}, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"Voice-emoji nickname state save failed: {exc}")
+
+
+def _can_edit_member_nick(member: discord.Member) -> bool:
+    guild = member.guild
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_nicknames:
+        return False
+    if member.id == guild.owner_id:
+        return False
+    return member.top_role < me.top_role
+
+
+def _member_in_voice(guild: discord.Guild, member_id: int) -> bool:
+    member = guild.get_member(member_id)
+    return member is not None and member.voice is not None and member.voice.channel is not None
+
+
+async def _restore_voice_nick(guild: discord.Guild, member_id: int) -> None:
+    """Remove the voice emoji from a member's nickname (caller holds the member lock)."""
+    state = voice_nick_state.get(member_id)
+    if state is None:
+        return
+    member = guild.get_member(member_id)
+    if member is not None:
+        prefix = f"{state['emoji']} "
+        # Only touch the nickname if it still carries our emoji (do not undo a manual rename).
+        if member.nick and member.nick.startswith(prefix) and _can_edit_member_nick(member):
+            original = state.get("original")
+            try:
+                await _api_call_with_retry(
+                    lambda: member.edit(nick=original, reason="Left voice — remove join-to-create emoji"),
+                    label=f"Voice emoji nickname restore for {member_id}",
+                )
+            except discord.Forbidden:
+                print(f"Voice emoji restore forbidden for {member} (Manage Nicknames / role hierarchy).")
+            except discord.HTTPException as exc:
+                print(f"Voice emoji restore failed for {member}: {exc}")
+    voice_nick_state.pop(member_id, None)
+    _save_voice_nick_state()
+
+
+async def _apply_voice_nick_emoji(member: discord.Member) -> None:
+    """Put a random emoji on the left of the member's nickname. Never raises."""
+    if member.bot:
+        return
+    lock = _voice_nick_locks.setdefault(member.id, asyncio.Lock())
+    try:
+        async with lock:
+            if member.id in voice_nick_state:
+                return
+            if not _can_edit_member_nick(member):
+                print(
+                    f"Voice emoji skipped for {member}: bot cannot edit this nickname "
+                    "(needs Manage Nicknames, role above the member, member is not the owner)."
+                )
+                return
+            emoji = random.choice(VOICE_NICK_EMOJIS)
+            prefix = f"{emoji} "
+            base = _truncate_utf16(member.display_name, VOICE_NICK_MAX_LEN - len(prefix.encode("utf-16-le")) // 2)
+            new_nick = f"{prefix}{base}"
+            original = member.nick
+            try:
+                await _api_call_with_retry(
+                    lambda: member.edit(nick=new_nick, reason="Join-to-create voice emoji"),
+                    label=f"Voice emoji nickname for {member.id}",
+                )
+            except discord.Forbidden:
+                print(f"Voice emoji forbidden for {member} (Manage Nicknames / role hierarchy).")
+                return
+            except discord.HTTPException as exc:
+                print(f"Voice emoji nickname failed for {member}: {exc}")
+                return
+            voice_nick_state[member.id] = {
+                "guild_id": member.guild.id,
+                "emoji": emoji,
+                "original": original,
+            }
+            _save_voice_nick_state()
+            # They may have left voice while the edit was in flight — undo right away.
+            if not _member_in_voice(member.guild, member.id):
+                await _restore_voice_nick(member.guild, member.id)
+    except Exception as exc:
+        print(f"Voice emoji apply unexpected error for {member}: {exc}")
+
+
+async def _remove_voice_nick_emoji(guild: discord.Guild, member_id: int) -> None:
+    """Restore the member's normal nickname after they left voice. Never raises."""
+    if member_id not in voice_nick_state:
+        return
+    lock = _voice_nick_locks.setdefault(member_id, asyncio.Lock())
+    try:
+        async with lock:
+            await _restore_voice_nick(guild, member_id)
+    except Exception as exc:
+        print(f"Voice emoji remove unexpected error for {member_id}: {exc}")
+
+
+async def _sync_voice_nick_emojis(guild: discord.Guild) -> None:
+    """On startup: clean emojis left behind for members who are no longer in voice."""
+    for member_id, state in list(voice_nick_state.items()):
+        if state["guild_id"] != guild.id:
+            continue
+        if not _member_in_voice(guild, member_id):
+            await _remove_voice_nick_emoji(guild, member_id)
+
+
 async def _create_join_to_create_room(member, trigger_channel):
     """Create a private sub-room when a member joins a join-to-create voice channel."""
     if member.bot or member.id in _join_create_in_progress:
@@ -506,6 +667,8 @@ async def _create_join_to_create_room(member, trigger_channel):
                     "Please join it manually from the voice channel list."
                 ),
             )
+
+        await _apply_voice_nick_emoji(member)
 
         await _send_room_control_panel(new_channel, member, kind=config["kind"])
     except discord.Forbidden as exc:
@@ -2971,10 +3134,12 @@ async def on_ready():
             print(f"Failed to join static channel: {e}")
 
     _start_background_tasks()
+    _load_voice_nick_state()
     for guild in bot.guilds:
         try:
             await _cleanup_and_register_temp_rooms(guild)
             _log_join_to_create_startup(guild)
+            await _sync_voice_nick_emojis(guild)
         except Exception as e:
             print(f"Temp room startup cleanup failed for {guild.name}: {e}")
 
@@ -5310,6 +5475,10 @@ async def on_voice_state_update(member, before, after):
             before.channel,
             reason="Empty temp voice room cleanup",
         )
+
+    # Left voice completely → take the join-to-create emoji off their nickname.
+    if not member.bot and before.channel is not None and after.channel is None:
+        await _remove_voice_nick_emoji(guild, member.id)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
