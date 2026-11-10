@@ -29,7 +29,7 @@
 |--------|--------|
 | **Lock** 🔒 | Verrouille : @everyone + Boy/Girl ne peuvent plus rejoindre. Staff + owner OK. Le nom de la room finit par **✘**. |
 | **Unlock** 🔓 | Déverrouille la room. Le nom finit par **✓**. |
-| **Rename** 📝 | Change le nom (modal, max 30 car.). Le **✓** (ouverte) / **✘** (verrouillée) reste toujours à la fin : le bot le remet même si l'owner renomme depuis Discord ou tape un faux ✓/✘. |
+| **Rename** 📝 | Change le nom (modal, max 30 car.). Le **✓** (ouverte) / **✘** (verrouillée) reste toujours à la fin : le bot le remet même si l'owner renomme depuis Discord ou tape un faux ✓/✘. L'emoji de la room reste devant (`🔥\|Nom ✓`). Discord limite à **2 renames / 10 min** par room : au-delà, le nouveau nom (et le ✓/✘) est mis en file et appliqué automatiquement. |
 | **Kick** 👞 | Déconnecte un membre du vocal. |
 | **Transfer** 👑 | Transfère la propriété à un autre membre. |
 | **Check Level** 📊 | Rappel : levels = bot séparé (`?level` si installé). |
@@ -44,7 +44,7 @@
 
 - Room **supprimée** quand tout le monde quitte.
 - Owner part + autres restent → **60 s** puis transfer aléatoire (lounge).
-- **Emoji de room** : chaque room créée via un hub reçoit un emoji aléatoire (`ROOM_EMOJIS`, ~125). Tous ceux qui entrent dans la room (owner + invités) ont l'emoji des deux côtés de leur pseudo (`🔥 Pseudo 🔥`) ; le nom de la room lounge utilise le même emoji. Dès qu'ils quittent la room, le pseudo redevient normal. Nécessite **Manage Nicknames** + rôle du bot au-dessus du membre (impossible sur l'owner du serveur). État sauvegardé dans `data/voice_nick_emojis.json` pour nettoyer après un redémarrage.
+- **Emoji de room** : chaque room créée via un hub reçoit un emoji aléatoire (`ROOM_EMOJIS`, ~125). Tous ceux qui entrent dans la room (owner + invités) ont l'emoji des deux côtés de leur pseudo (`🔥 Pseudo 🔥`) ; le nom de la room lounge utilise le même emoji. Dès qu'ils quittent la room, le pseudo redevient normal. Quand quelqu'un passe par le hub depuis une autre room, l'ancien emoji est retiré **avant** la création de la nouvelle room (jamais d'emojis empilés). Après un redéploiement (Render Free = pas de disque persistant), l'emoji de la room et les pseudos sont relus depuis le nom de la room (`🔥\|Nom ✓`) et le pseudo (`🔥 Pseudo 🔥`). Nécessite **Manage Nicknames** + rôle du bot au-dessus du membre (impossible sur l'owner du serveur). État sauvegardé dans `data/voice_nick_emojis.json` pour nettoyer après un redémarrage.
 - Diagnostic admin : `?checkjoincreate`
 
 ---

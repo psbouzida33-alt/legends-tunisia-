@@ -339,8 +339,8 @@ NSFW_ROOM_NAME_PREFIX = "🔞"
 
 
 def _strip_room_marks(name: str) -> str:
-    """Remove trailing ✓/✘-style marks (typed by a user or added by the bot)."""
-    name = name.rstrip()
+    """Trim the name and remove trailing ✓/✘-style marks (typed by a user or added by the bot)."""
+    name = name.strip()
     while name and name[-1] in _ROOM_MARK_CHARS:
         name = name[:-1].rstrip()
     return name
@@ -447,6 +447,10 @@ voice_nick_state: dict[int, dict] = {}
 room_emojis: dict[int, str] = {}
 _voice_nick_locks: dict[int, asyncio.Lock] = {}
 _voice_nick_skip_logged: set[int] = set()
+# member_id -> {"nicks": [nicknames the bot set recently], "original": original nickname}.
+# Kept after the restore (memory only): Discord's cached nickname can lag behind and still show an
+# older wrapped one, which must be recognised as ours (never wrapped again, never left behind).
+_voice_nick_last: dict[int, dict] = {}
 
 
 def _truncate_utf16(text: str, limit: int) -> str:
@@ -528,12 +532,85 @@ def _member_room_emoji(guild: discord.Guild, member_id: int) -> str | None:
     return room_emojis.get(member.voice.channel.id)
 
 
-def _nick_is_ours(state: dict, current: str | None) -> bool:
-    """True if the member's nickname is still the one the bot set (cache may lag a bit)."""
+def _nick_is_ours(state: dict, current: str | None, member_id: int) -> bool:
+    """True if the member's nickname is one the bot set (the cached nickname can lag behind)."""
     nick_set = state.get("nick")
     if current == nick_set or current == state.get("original"):
         return True
+    if current in _voice_nick_last.get(member_id, {}).get("nicks", ()):
+        return True  # stale cache still showing an earlier nickname of ours
+    if _unwrap_with_emoji(current, state["emoji"]) is not None:
+        return True  # wrapped with the emoji we put on (Discord may normalise the exact text)
     return nick_set is None and bool(current) and current.startswith(f"{state['emoji']} ")
+
+
+def _unwrap_with_emoji(nick: str | None, emoji: str) -> str | None:
+    """'🔥 Name 🔥' -> 'Name' when it is wrapped with exactly this emoji; else None."""
+    if not nick:
+        return None
+    prefix, suffix = f"{emoji} ", f" {emoji}"
+    if len(nick) > len(prefix) + len(suffix) and nick.startswith(prefix) and nick.endswith(suffix):
+        return nick[len(prefix):-len(suffix)].strip() or None
+    return None
+
+
+def _unwrap_room_nick(nick: str | None) -> str | None:
+    """'🔥 Name 🔥' -> 'Name' (same room emoji on both sides); None if the nickname is not wrapped."""
+    for emoji in ROOM_EMOJIS:
+        inner = _unwrap_with_emoji(nick, emoji)
+        if inner is not None:
+            return inner
+    return None
+
+
+def _room_emoji_from_name(channel_name: str) -> str | None:
+    """Lounge rooms are named '<emoji>|Name ✓' — read the room emoji back after a restart."""
+    name = _strip_nsfw_room_prefix(channel_name)
+    for emoji in ROOM_EMOJIS:
+        if name.startswith(f"{emoji}|"):
+            return emoji
+    return None
+
+
+def _adopt_wrapped_nicks(channel, emoji: str) -> int:
+    """After a restart the saved state is gone (no persistent disk): re-learn who wears this room's emoji."""
+    adopted = 0
+    for member in channel.members:
+        if member.bot or member.id in voice_nick_state:
+            continue
+        inner = _unwrap_with_emoji(member.nick, emoji)
+        if inner is None:
+            continue
+        original = None if inner in (member.global_name, member.name) else inner
+        voice_nick_state[member.id] = {
+            "guild_id": channel.guild.id,
+            "emoji": emoji,
+            "nick": member.nick,
+            "original": original,
+        }
+        adopted += 1
+    if adopted:
+        _save_voice_emoji_state()
+    return adopted
+
+
+def _fully_unwrap_nick(nick: str | None) -> str | None:
+    """Strip every emoji wrap, so a nickname that got wrapped twice is healed too."""
+    while True:
+        inner = _unwrap_room_nick(nick)
+        if inner is None:
+            return nick
+        nick = inner
+
+
+def _member_base_name(member: discord.Member) -> str:
+    """The member's real name for room names and nicknames — never the emoji-wrapped one."""
+    state = voice_nick_state.get(member.id)
+    if state is not None and _nick_is_ours(state, member.nick, member.id):
+        name = state.get("original") or member.global_name or member.name
+    else:
+        name = member.nick or member.global_name or member.name
+    return _fully_unwrap_nick(name) or member.name
 
 
 async def _restore_voice_nick(guild: discord.Guild, member_id: int) -> None:
@@ -543,7 +620,7 @@ async def _restore_voice_nick(guild: discord.Guild, member_id: int) -> None:
         return
     member = guild.get_member(member_id)
     # Only touch the nickname if it is still ours (do not undo a manual rename).
-    if member is not None and _nick_is_ours(state, member.nick) and _can_edit_member_nick(member):
+    if member is not None and _nick_is_ours(state, member.nick, member_id) and _can_edit_member_nick(member):
         original = state.get("original")
         try:
             await _api_call_with_retry(
@@ -567,12 +644,20 @@ async def _apply_voice_nick_emoji(member: discord.Member, emoji: str) -> None:
         async with lock:
             state = voice_nick_state.get(member.id)
             current = member.nick
-            if state is not None and _nick_is_ours(state, current):
+            last = _voice_nick_last.get(member.id)
+            if state is not None and _nick_is_ours(state, current, member.id):
                 if state["emoji"] == emoji and current == state.get("nick"):
                     return  # already wearing this room's emoji
                 original = state.get("original")  # moved to another room: keep the real original
+            elif last is not None and current in last["nicks"]:
+                # The cache still shows a wrapped nickname we removed a moment ago
+                # (gateway update not here yet) — never wrap it a second time.
+                original = last["original"]
             else:
                 original = current  # first time, or they renamed themselves meanwhile
+                inner = _unwrap_room_nick(current)
+                if inner is not None and _unwrap_room_nick(inner) is not None:
+                    original = _fully_unwrap_nick(current)  # wrapped twice by an old bug — heal it
             if not _can_edit_member_nick(member):
                 if member.id not in _voice_nick_skip_logged:
                     _voice_nick_skip_logged.add(member.id)
@@ -581,7 +666,8 @@ async def _apply_voice_nick_emoji(member: discord.Member, emoji: str) -> None:
                         "(needs Manage Nicknames, role above the member, member is not the owner)."
                     )
                 return
-            base = original or member.global_name or member.name
+            # Build from the real name, so emojis never stack (🌙 🔥 Name 🔥 🌙).
+            base = _fully_unwrap_nick(original) or member.global_name or member.name
             new_nick = _voice_nick_text(emoji, base)
             try:
                 await _api_call_with_retry(
@@ -600,6 +686,9 @@ async def _apply_voice_nick_emoji(member: discord.Member, emoji: str) -> None:
                 "nick": new_nick,
                 "original": original,
             }
+            record = _voice_nick_last.setdefault(member.id, {"nicks": [], "original": original})
+            record["original"] = original
+            record["nicks"] = (record["nicks"] + [new_nick])[-8:]
             _save_voice_emoji_state()
             # They may have left the room while the edit was in flight — undo right away.
             if _member_room_emoji(member.guild, member.id) is None:
@@ -624,16 +713,15 @@ async def _update_voice_nick_for_state_change(member: discord.Member, before, af
     """Called on every voice state change: wear the room emoji inside a room, drop it outside."""
     if member.bot or before.channel == after.channel:
         return
-    emoji = room_emojis.get(after.channel.id) if after.channel is not None else None
+    # Look at where the member is RIGHT NOW, not at what this event says: events are handled
+    # concurrently, and a newer one may already have moved them into a freshly created room
+    # (otherwise the hub event could strip the emoji the new room just gave them).
+    emoji = _member_room_emoji(member.guild, member.id)
     if emoji:
         await _apply_voice_nick_emoji(member, emoji)
         return
-    if (
-        after.channel is not None
-        and after.channel.id in JOIN_TO_CREATE_CHANNELS
-        and member.id in voice_nick_state
-    ):
-        return  # about to be moved into a brand-new room — keep the nickname, no flicker
+    # Anywhere that is not a room (including the join-to-create hub): the emoji comes off.
+    # A new room puts a fresh one on once the member lands in it.
     await _remove_voice_nick_emoji(member.guild, member.id)
 
 
@@ -686,6 +774,12 @@ async def _create_join_to_create_room(member, trigger_channel):
 
     _join_create_in_progress.add(member.id)
     try:
+        # Take the real name FIRST (never the emoji-wrapped nickname), then wait until the old
+        # room emoji is off their nickname before building the new room — so emojis can never
+        # stack (🌙 🔥 Name 🔥 🌙). The new emoji goes on once they land in the new room.
+        clean_name = _member_base_name(member)
+        await _remove_voice_nick_emoji(guild, member.id)
+
         category = trigger_channel.category
         everyone_role = guild.default_role
         staff_roles = _get_staff_roles(guild)
@@ -733,9 +827,9 @@ async def _create_join_to_create_room(member, trigger_channel):
 
         room_emoji = random.choice(ROOM_EMOJIS)
         if config["kind"] == "lounge":
-            channel_name = format_lounge_room_name(member.display_name, room_emoji)
+            channel_name = format_lounge_room_name(clean_name, room_emoji)
         else:
-            channel_name = config["name"].format(member=member.display_name)
+            channel_name = config["name"].format(member=clean_name)
 
         new_channel = await guild.create_voice_channel(
             name=channel_name[:100],
@@ -794,50 +888,143 @@ async def _create_join_to_create_room(member, trigger_channel):
         _join_create_in_progress.discard(member.id)
 
 
+ROOM_RENAME_LIMIT = 2  # Discord allows 2 channel name changes ...
+ROOM_RENAME_WINDOW = 600.0  # ... per 10 minutes, per channel
 _room_name_sync_tasks: dict[int, asyncio.Task] = {}
+_room_name_pending: dict[int, str] = {}  # wanted name (without ✓/✘), applied as soon as Discord allows
+_room_name_edit_times: dict[int, list[float]] = {}
+_room_name_blocked_until: dict[int, float] = {}
+_room_name_own_edits: dict[int, str] = {}
 
 
-def _desired_lounge_room_name(channel) -> str | None:
-    """Name a lounge room must have right now (✓ open / ✘ locked); None for other rooms."""
-    if room_kinds.get(channel.id) != "lounge":
-        return None
-    return _lounge_room_name(channel.name, locked=channel.id in locked_rooms)
+def _note_room_name_change(channel_id: int) -> None:
+    now = time.monotonic()
+    times = [t for t in _room_name_edit_times.get(channel_id, []) if now - t < ROOM_RENAME_WINDOW]
+    times.append(now)
+    _room_name_edit_times[channel_id] = times
+
+
+def _room_name_wait_seconds(channel_id: int) -> float:
+    """How long until Discord lets this room be renamed again (0 = now)."""
+    now = time.monotonic()
+    times = [t for t in _room_name_edit_times.get(channel_id, []) if now - t < ROOM_RENAME_WINDOW]
+    _room_name_edit_times[channel_id] = times
+    wait = 0.0
+    if len(times) >= ROOM_RENAME_LIMIT:
+        wait = times[-ROOM_RENAME_LIMIT] + ROOM_RENAME_WINDOW - now + 2.0
+    wait = max(wait, _room_name_blocked_until.get(channel_id, 0.0) - now)
+    return max(0.0, wait)
+
+
+async def _set_room_name(channel, name: str, *, reason: str) -> None:
+    """Every room rename goes through here, so it is counted against Discord's rename limit."""
+    _room_name_own_edits[channel.id] = name
+    try:
+        await channel.edit(name=name, reason=reason)
+    except BaseException:
+        if _room_name_own_edits.get(channel.id) == name:
+            _room_name_own_edits.pop(channel.id, None)
+        raise
+    _note_room_name_change(channel.id)
+
+
+def _desired_room_name(channel) -> str | None:
+    """Name the room must have right now (lounges: ✓ open / ✘ locked); None = nothing to enforce."""
+    pending = _room_name_pending.get(channel.id)
+    if room_kinds.get(channel.id) == "lounge":
+        base = pending if pending is not None else channel.name
+        return _lounge_room_name(base, locked=channel.id in locked_rooms)
+    return pending[:100] if pending is not None else None
 
 
 async def _room_name_sync_loop(channel_id: int) -> None:
     try:
-        for _ in range(5):
+        for _ in range(8):
             channel = bot.get_channel(channel_id)
             if not isinstance(channel, discord.VoiceChannel):
                 return
-            desired = _desired_lounge_room_name(channel)
-            if desired is None or channel.name == desired:
+            desired = _desired_room_name(channel)
+            if desired is None:
                 return
+            if channel.name == desired:
+                _room_name_pending.pop(channel_id, None)
+                return
+            wait = _room_name_wait_seconds(channel_id)
+            if wait > 0:
+                # Wait here, NOT inside discord.py's rate-limit handling (that would block every
+                # other edit of this channel), then re-read the lock state / wanted name.
+                await asyncio.sleep(wait)
+                continue
             try:
-                # Discord allows only 2 renames per 10 minutes per channel. discord.py waits
-                # for that limit here, in the background, so lock/unlock itself stays instant.
-                await channel.edit(name=desired, reason="Room mark: ✓ open / ✘ locked")
+                await asyncio.wait_for(
+                    _set_room_name(channel, desired, reason="Room name: ✓ open / ✘ locked"),
+                    timeout=30,
+                )
             except discord.NotFound:
                 return
+            except asyncio.TimeoutError:
+                # Discord's limit is stricter than ours (e.g. renames made in the Discord app).
+                _room_name_blocked_until[channel_id] = time.monotonic() + 60
+                continue
             except discord.HTTPException as exc:
-                print(f"Room mark rename failed for {channel.name}: {exc.status} {exc.text}")
+                print(f"Room name update failed for {channel.name}: {exc.status} {exc.text}")
                 if exc.status != 429:
                     return
-                await asyncio.sleep(float(getattr(exc, "retry_after", 0) or 30))
+                _room_name_blocked_until[channel_id] = time.monotonic() + float(
+                    getattr(exc, "retry_after", 0) or 60
+                )
                 continue
             await asyncio.sleep(2)  # let the gateway update the cached name, then re-check
     except Exception as exc:
-        print(f"Room mark sync error for {channel_id}: {exc}")
+        print(f"Room name sync error for {channel_id}: {exc}")
     finally:
-        _room_name_sync_tasks.pop(channel_id, None)
+        if _room_name_sync_tasks.get(channel_id) is asyncio.current_task():
+            _room_name_sync_tasks.pop(channel_id, None)
 
 
-def _schedule_room_name_sync(channel_id: int) -> None:
-    """Make the room name show its real state (✓ open / ✘ locked) in the background."""
+def _schedule_room_name_sync(channel_id: int) -> asyncio.Task:
+    """Make the room name show its real state / wanted name in the background."""
     task = _room_name_sync_tasks.get(channel_id)
     if task is not None and not task.done():
-        return  # the running task re-checks the latest state itself
-    _room_name_sync_tasks[channel_id] = asyncio.create_task(_room_name_sync_loop(channel_id))
+        return task  # the running task re-checks the latest state itself
+    task = asyncio.create_task(_room_name_sync_loop(channel_id))
+    _room_name_sync_tasks[channel_id] = task
+    return task
+
+
+async def _queue_room_rename(channel, typed_name: str) -> tuple[str, bool]:
+    """Rename a room; the ✓/✘ always stays last. Returns (final name, applied right now?)."""
+    base = _strip_room_marks(typed_name)
+    room_emoji = room_emojis.get(channel.id)
+    if room_emoji and room_kinds.get(channel.id) == "lounge":
+        base = f"{room_emoji}|{base}"  # keep the room emoji, like on creation (also lets a restart recognise the room)
+    if _channel_has_nsfw_label(channel.name):
+        base = f"{NSFW_ROOM_NAME_PREFIX}{base}"
+    _room_name_pending[channel.id] = base
+    final = _desired_room_name(channel) or base[:100]
+    task = _schedule_room_name_sync(channel.id)
+    if _room_name_wait_seconds(channel.id) > 0:
+        return final, False
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=20)
+    except asyncio.TimeoutError:
+        return final, False
+    current = bot.get_channel(channel.id)
+    return final, current is not None and current.name == final
+
+
+def _room_mark_note(channel_id: int, mark: str) -> str:
+    """Sentence for the lock/unlock reply about the ✓/✘ in the room name."""
+    if room_kinds.get(channel_id) != "lounge":
+        return ""
+    wait = _room_name_wait_seconds(channel_id)
+    if wait > 0:
+        mins = max(1, int((wait + 59) // 60))
+        return (
+            f" ⏳ Discord limits room renames (2 per 10 min) — the **{mark}** in the room name "
+            f"will update in ~{mins} min."
+        )
+    return f" The room name will end with **{mark}**."
 
 
 async def _set_room_locked(channel, *, locked: bool):
@@ -928,8 +1115,12 @@ async def _apply_nsfw_room_mark(
     enabled: bool,
     reason: str,
 ) -> None:
-    await channel.edit(name=new_name, reason=reason)
+    await _set_room_name(channel, new_name, reason=reason)
     room_nsfw_enabled[channel.id] = enabled
+    pending = _room_name_pending.get(channel.id)
+    if pending is not None:  # keep a queued rename in step with the 18+ label
+        plain = _strip_nsfw_room_prefix(pending)
+        _room_name_pending[channel.id] = f"{NSFW_ROOM_NAME_PREFIX}{plain}" if enabled else plain
 
 
 async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, str, float | None]:
@@ -955,14 +1146,24 @@ async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, s
         room_nsfw_enabled[fresh.id] = enabled
         return enabled, new_name, None
 
+    wait = _room_name_wait_seconds(fresh.id)
+    if wait > 0:  # Discord would make us hang on its rename limit — say so right away instead
+        return has_label, fresh.name, wait
+
     try:
-        await _apply_nsfw_room_mark(
-            fresh,
-            new_name=new_name,
-            enabled=enabled,
-            reason="Room owner toggled 18+ label",
+        await asyncio.wait_for(
+            _apply_nsfw_room_mark(
+                fresh,
+                new_name=new_name,
+                enabled=enabled,
+                reason="Room owner toggled 18+ label",
+            ),
+            timeout=30,
         )
         return enabled, new_name, None
+    except asyncio.TimeoutError:
+        _room_name_blocked_until[fresh.id] = time.monotonic() + 60
+        return has_label, fresh.name, 60.0
     except discord.HTTPException as exc:
         if exc.status != 429:
             raise
@@ -1951,28 +2152,27 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
         fresh = interaction.guild.get_channel(self.channel.id) or self.channel
         # Keep the 🔞 label through a rename instead of silently dropping it —
         # a plain text rename shouldn't undo the owner's 18+ toggle.
-        new_name = _strip_room_marks(self.channel_name.value)
-        if not new_name:
+        typed = _strip_room_marks(self.channel_name.value)
+        if not typed:
             return await interaction.response.send_message("Please enter a room name.", ephemeral=True)
-        if _channel_has_nsfw_label(fresh.name):
-            new_name = f"{NSFW_ROOM_NAME_PREFIX}{new_name}"
-        if room_kinds.get(fresh.id) == "lounge":
-            # The ✓ (open) / ✘ (locked) mark always stays, whatever name is typed.
-            new_name = _lounge_room_name(new_name, locked=fresh.id in locked_rooms)
-        new_name = new_name[:100]
 
         await interaction.response.defer(ephemeral=True)
         try:
-            # Discord allows 2 renames per 10 minutes per channel — do not hang on the limit.
-            await asyncio.wait_for(self.channel.edit(name=new_name), timeout=20)
-        except asyncio.TimeoutError:
-            return await interaction.followup.send(
-                "Discord limits room renames (2 per 10 minutes). Try again in a few minutes.",
-                ephemeral=True,
-            )
+            # The ✓ (open) / ✘ (locked) mark always stays last, whatever name is typed. Discord
+            # allows only 2 renames per 10 minutes per room: past that the new name is queued and
+            # applied automatically, never lost and never blocking the panel.
+            final_name, applied = await _queue_room_rename(fresh, typed)
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"Could not rename the room. ({exc.text})", ephemeral=True)
-        await interaction.followup.send(f"Room name updated to: **{new_name}**", ephemeral=True)
+
+        if applied:
+            return await interaction.followup.send(f"Room name updated to: **{final_name}**", ephemeral=True)
+        mins = max(1, int((_room_name_wait_seconds(fresh.id) + 59) // 60))
+        await interaction.followup.send(
+            f"⏳ Discord limits room renames (2 per 10 min). **{final_name}** is queued — "
+            f"it will be applied automatically in ~{mins} min.",
+            ephemeral=True,
+        )
 
 
 class ControlPanelView(discord.ui.View):
@@ -2060,10 +2260,15 @@ class ControlPanelView(discord.ui.View):
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
-        await _set_room_locked(channel, locked=True)
-        await interaction.response.send_message(
-            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect. "
-            "The room name will end with **✘**.",
+        # Answer Discord right away (3 s limit) — locking takes several API calls.
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await _set_room_locked(channel, locked=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Could not lock the room. ({exc.text})", ephemeral=True)
+        await interaction.followup.send(
+            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect."
+            + _room_mark_note(channel.id, "✘"),
             ephemeral=True,
         )
 
@@ -2074,9 +2279,13 @@ class ControlPanelView(discord.ui.View):
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
-        await _set_room_locked(channel, locked=False)
-        await interaction.response.send_message(
-            "Room unlocked — others can join again. The room name will end with **✓**.",
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await _set_room_locked(channel, locked=False)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Could not unlock the room. ({exc.text})", ephemeral=True)
+        await interaction.followup.send(
+            "Room unlocked — others can join again." + _room_mark_note(channel.id, "✓"),
             ephemeral=True,
         )
 
@@ -2442,6 +2651,13 @@ def _clear_temp_room_tracking(channel_id: int):
     locked_rooms.discard(channel_id)
     if room_emojis.pop(channel_id, None) is not None:
         _save_voice_emoji_state()
+    sync_task = _room_name_sync_tasks.pop(channel_id, None)
+    if sync_task is not None and not sync_task.done():
+        sync_task.cancel()
+    _room_name_pending.pop(channel_id, None)
+    _room_name_edit_times.pop(channel_id, None)
+    _room_name_blocked_until.pop(channel_id, None)
+    _room_name_own_edits.pop(channel_id, None)
 
 
 def _infer_room_owner(channel: discord.VoiceChannel) -> discord.Member | None:
@@ -2541,6 +2757,14 @@ async def _cleanup_and_register_temp_rooms(guild):
                 if voice_channel.name.rstrip().endswith(LOUNGE_ROOM_LOCKED_SUFFIX):
                     locked_rooms.add(voice_channel.id)
                 _schedule_room_name_sync(voice_channel.id)
+                # The room emoji and who wears it are not saved anywhere that survives a
+                # redeploy — read them back from the room name and the members' nicknames.
+                room_emoji = room_emojis.get(voice_channel.id) or _room_emoji_from_name(voice_channel.name)
+                if room_emoji:
+                    if room_emojis.get(voice_channel.id) != room_emoji:
+                        room_emojis[voice_channel.id] = room_emoji
+                        _save_voice_emoji_state()
+                    _adopt_wrapped_nicks(voice_channel, room_emoji)
             print(
                 f"Re-registered temp room: {voice_channel.name} "
                 f"(kind={kind}, owner={owner.display_name if owner else 'unknown'})"
@@ -5593,7 +5817,13 @@ async def on_guild_channel_update(before, after):
     """Owners can also rename their room from Discord itself — put the ✓/✘ mark back if it was dropped or faked."""
     if not isinstance(after, discord.VoiceChannel) or before.name == after.name:
         return
-    desired = _desired_lounge_room_name(after)
+    if not _is_tracked_temp_room(after.id):
+        return
+    if _room_name_own_edits.get(after.id) == after.name:
+        _room_name_own_edits.pop(after.id, None)  # our own rename — already counted
+    else:
+        _note_room_name_change(after.id)  # renamed by someone else — counts for Discord's limit too
+    desired = _desired_room_name(after)
     if desired is not None and after.name != desired:
         _schedule_room_name_sync(after.id)
 
