@@ -27,9 +27,9 @@
 
 | Bouton | Action |
 |--------|--------|
-| **Lock** 🔒 | Verrouille : @everyone + Boy/Girl ne peuvent plus rejoindre. Staff + owner OK. Le nom de la room finit par **✘**. |
-| **Unlock** 🔓 | Déverrouille la room. Le nom finit par **✓**. |
-| **Rename** 📝 | Change le nom (modal, max 30 car.). Le **✓** (ouverte) / **✘** (verrouillée) reste toujours à la fin : le bot le remet même si l'owner renomme depuis Discord ou tape un faux ✓/✘. L'emoji de la room reste devant (`🔥\|Nom ✓`). Le panneau (Lock, Unlock, Rename, 18+) n'affiche aucun message de limite : si Discord bloque un rename (2 / 10 min par room), le nouveau nom (et le ✓/✘) est appliqué automatiquement dès que Discord l'autorise. |
+| **Lock** 🔒 | Verrouille : @everyone + Boy/Girl ne peuvent plus rejoindre. Staff + owner OK. Le **statut vocal** (sous le nom de la room) passe à `🔒 Locked ✘` tout de suite. Le nom de la room ne change pas (pas de limite de rename). |
+| **Unlock** 🔓 | Déverrouille la room. Le statut vocal repasse à `🔓 Open ✓`. |
+| **Rename** 📝 | Change le nom (modal, max 30 car.), tel que tapé ; l'emoji de la room reste devant (`🔥\|Nom`). Le panneau (Lock, Unlock, Rename, 18+) n'affiche aucun message de limite : si Discord bloque un rename (2 / 10 min par room), le nouveau nom est appliqué automatiquement dès que Discord l'autorise. |
 | **Kick** 👞 | Déconnecte un membre du vocal. |
 | **Transfer** 👑 | Transfère la propriété à un autre membre. |
 | **Check Level** 📊 | Rappel : levels = bot séparé (`?level` si installé). |
@@ -39,7 +39,7 @@
 
 | Hub | Nom de la room | Accès |
 |-----|----------------|-------|
-| **Create Lounge** | `🎙️\|{username} ✓` | Boy + Girl + owner |
+| **Create Lounge** | `🔥\|{username}` (emoji au hasard ; l'état ouverte/verrouillée est dans le statut vocal) | Boy + Girl + owner |
 | **Support** | `Support \| {username}` | Staff + owner |
 
 - Room **supprimée** quand tout le monde quitte.
