@@ -30,6 +30,14 @@ FONT_SIZE_RATIO = 0.042
 TEXT_COLOR = "#d4a574"
 MAX_FIELD_LEN = 48
 
+# A long reason wraps under the underline instead of being cut at MAX_FIELD_LEN: it stays
+# left of the minaret (REASON_MAX_X_RATIO) and uses at most REASON_MAX_LINES lines.
+# A reason that fits on one line is drawn exactly where it always was.
+REASON_MAX_LEN = 160
+REASON_MAX_LINES = 4
+REASON_MAX_X_RATIO = 0.70
+REASON_LINE_SPACING = 1.15
+
 # Punished member avatar (right side — sky area above palm trees)
 AVATAR_SIZE_RATIO = 0.40
 AVATAR_CENTER_X_RATIO = 0.24
@@ -61,6 +69,45 @@ def _truncate(text: str, max_len: int = MAX_FIELD_LEN) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1] + "…"
+
+
+def _wrap_text(draw, text: str, font, max_width: float, max_lines: int) -> list[str]:
+    """Greedy word wrap to max_width pixels; the last line ends with an ellipsis when cut."""
+    text = " ".join((text or "").split())
+    if not text:
+        return [""]
+
+    def fits(value: str) -> bool:
+        return draw.textlength(value, font=font) <= max_width
+
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}".strip()
+        if fits(candidate):
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        # A single word wider than the whole line is split by characters.
+        while not fits(word):
+            cut = len(word) - 1
+            while cut > 1 and not fits(word[:cut]):
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        current = word
+    if current:
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and not fits(last + "…"):
+            last = last[:-1]
+        lines[-1] = last.rstrip() + "…"
+    return lines
 
 
 def _display_name(member) -> str:
@@ -120,7 +167,8 @@ async def build_punishment_card(
     canvas = Image.open(template_path).convert("RGBA")
     width, height = canvas.size
     draw = ImageDraw.Draw(canvas)
-    font = _load_font(max(14, int(height * FONT_SIZE_RATIO)))
+    font_size = max(14, int(height * FONT_SIZE_RATIO))
+    font = _load_font(font_size)
 
     try:
         avatar = await _load_member_avatar(member)
@@ -129,11 +177,20 @@ async def build_punishment_card(
         print(f"Punishment avatar overlay failed for {member.id}: {exc}")
 
     text_x = int(width * TEXT_X_RATIO)
-    lines = (
+    reason_y = int(height * REASON_Y_RATIO)
+    reason_lines = _wrap_text(
+        draw,
+        _truncate(reason or "No reason provided", REASON_MAX_LEN),
+        font,
+        int(width * REASON_MAX_X_RATIO) - text_x,
+        REASON_MAX_LINES,
+    )
+    lines = [
         (int(height * USERNAME_Y_RATIO), _truncate(_display_name(member))),
         (int(height * PUNISHER_Y_RATIO), _truncate(_display_name(punisher))),
-        (int(height * REASON_Y_RATIO), _truncate(reason or "No reason provided")),
-    )
+    ]
+    for index, reason_line in enumerate(reason_lines):
+        lines.append((reason_y + int(index * font_size * REASON_LINE_SPACING), reason_line))
 
     for y, text in lines:
         draw.text((text_x, y), text, font=font, fill=TEXT_COLOR, anchor="ls")

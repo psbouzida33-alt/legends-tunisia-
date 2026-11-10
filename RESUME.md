@@ -198,6 +198,15 @@ Panel séparé, un seul choix : 18-, 18-25, 25-35, 35+ (même emoji `age` pour t
 - **Chat mute** → suppression auto des messages
 - **Voice mute** → server mute auto en vocal
 
+### Channel piège (auto-ban)
+- Channel `1569842436921102426` (`AUTO_BAN_CHANNEL_ID`, threads inclus) : **quiconque écrit un message est banni automatiquement**, son message est supprimé, et la carte punishment **BAN** (punisher = le bot) est postée dans le log punishment.
+- Raison (audit log + carte + DM si possible) : `Automatic ban: Sending messages in this channel is prohibited. No exceptions` (`AUTO_BAN_REASON`).
+- Seul le rôle **Head Admin** (`1511828976732209252`, le même que Giveaway Admin / `BAN_TIMEOUT_IMMUNE_ROLE_IDS`) est immunisé. Les autres staffs/modérateurs sont bannis aussi. Les bots sont ignorés.
+- Plusieurs messages envoyés d'un coup par le même membre = un seul ban et une seule carte (anti-doublon 5 min).
+- Si le bot ne peut pas bannir (rôle du membre au-dessus du bot, owner du serveur), il supprime juste le message et le note dans les logs.
+- Permissions bot : **Ban Members** + **Manage Messages** dans ce channel + voir le channel ; rôle du bot au-dessus des membres à bannir.
+- La raison longue de la carte punishment passe maintenant à la ligne (4 lignes max, `…` si plus long) au lieu d'être coupée à 48 caractères.
+
 ### Alertes staff
 - **Not Verified** dans Verification 1/2 → DM staff
 - Membre normal dans **Support** → notification staff

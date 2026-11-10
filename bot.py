@@ -92,6 +92,11 @@ GIVEAWAY_CHANNEL_ID = 1518721917312434197
 GIVEAWAY_ADMIN_ROLE_ID = 1511828976732209252
 BAN_TIMEOUT_IMMUNE_ROLE_IDS = [GIVEAWAY_ADMIN_ROLE_ID]
 
+# Trap channel: whoever writes here is banned on the spot (Head Admin role = GIVEAWAY_ADMIN_ROLE_ID
+# is immune through BAN_TIMEOUT_IMMUNE_ROLE_IDS) and the usual punishment card is posted.
+AUTO_BAN_CHANNEL_ID = 1569842436921102426
+AUTO_BAN_REASON = "Automatic ban: Sending messages in this channel is prohibited. No exceptions"
+
 TICKET_PANEL_CHANNEL_ID = 1534182107310719037
 TICKET_LOG_CHANNEL_ID = 1522527871887998987
 TICKET_CATEGORY_ID = 1523436013337448638
@@ -4900,6 +4905,77 @@ class _PanelCtx:
             await self.interaction.followup.send(content, **kwargs)
 
 
+class _AutoBanCtx:
+    """ctx shim for _post_punishment_card when the bot itself is the punisher:
+    no command message to touch, and notices go to the log instead of a channel."""
+
+    def __init__(self, guild: discord.Guild):
+        self.author = guild.me
+        self.guild = guild
+        self.message = _PanelNullMessage()
+
+    async def send(self, content=None, **_kwargs):
+        print(f"Auto-ban notice: {content}")
+
+
+# member id -> monotonic time of the first trap-channel message handled for them.
+# Several messages sent in a burst are dispatched concurrently, and Discord answers a
+# second ban of an already banned user with success, so without this each message
+# would post its own punishment card.
+_auto_ban_seen: dict[int, float] = {}
+AUTO_BAN_DEDUP_SECONDS = 300
+
+
+async def _auto_ban_trap_channel(message: discord.Message) -> bool:
+    """Ban whoever writes in AUTO_BAN_CHANNEL_ID. Returns True when the message was handled
+    (the caller must not process it any further), False for messages we leave alone."""
+    channel = message.channel
+    if (
+        getattr(channel, "id", None) != AUTO_BAN_CHANNEL_ID
+        and getattr(channel, "parent_id", None) != AUTO_BAN_CHANNEL_ID  # threads in the channel
+    ):
+        return False
+    guild = message.guild
+    member = message.author
+    if guild is None or member.bot or not isinstance(member, discord.Member):
+        return False
+    if _is_ban_timeout_immune(member):
+        return False
+
+    now = time.monotonic()
+    for user_id, seen_at in list(_auto_ban_seen.items()):
+        if now - seen_at > AUTO_BAN_DEDUP_SECONDS:
+            del _auto_ban_seen[user_id]
+    already_handled = member.id in _auto_ban_seen
+    _auto_ban_seen[member.id] = now  # no await before this line: the check above is atomic
+
+    banned = False
+    if not already_handled:
+        try:
+            await guild.ban(member, reason=AUTO_BAN_REASON, delete_message_seconds=0)
+            banned = True
+        except discord.Forbidden:
+            print(f"Auto-ban: cannot ban {member} ({member.id}) — role above the bot or missing Ban Members.")
+        except discord.HTTPException as exc:
+            print(f"Auto-ban failed for {member.id}: {exc.text}")
+
+    try:
+        await message.delete()
+    except discord.NotFound:
+        pass
+    except discord.Forbidden:
+        print(f"Auto-ban: cannot delete message in {channel.id} (missing Manage Messages)")
+    except discord.HTTPException as exc:
+        print(f"Auto-ban: message delete failed: {exc.text}")
+
+    if banned:
+        try:
+            await _post_punishment_card(_AutoBanCtx(guild), "ban", member, AUTO_BAN_REASON)
+        except Exception as exc:
+            print(f"Auto-ban punishment card failed for {member.id}: {exc}")
+    return True
+
+
 class PanelBanModal(discord.ui.Modal, title="Ban Member"):
     member_input = discord.ui.TextInput(label="User ID or @mention", max_length=100)
     reason_input = discord.ui.TextInput(
@@ -5682,6 +5758,10 @@ async def verify_panel_cmd(ctx):
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # Trap channel first: a ban beats everything, and ?commands typed there must not run.
+    if await _auto_ban_trap_channel(message):
         return
 
     # Commands first — chat mute must not block ?ping / ?level before processing.
