@@ -29,7 +29,7 @@
 |--------|--------|
 | **Lock** 🔒 | Verrouille : @everyone + Boy/Girl ne peuvent plus rejoindre. Staff + owner OK. Le nom de la room finit par **✘**. |
 | **Unlock** 🔓 | Déverrouille la room. Le nom finit par **✓**. |
-| **Rename** 📝 | Change le nom (modal, max 30 car.). Le **✓** (ouverte) / **✘** (verrouillée) reste toujours à la fin : le bot le remet même si l'owner renomme depuis Discord ou tape un faux ✓/✘. L'emoji de la room reste devant (`🔥\|Nom ✓`). Discord limite à **2 renames / 10 min** par room : au-delà, le nouveau nom (et le ✓/✘) est mis en file et appliqué automatiquement. |
+| **Rename** 📝 | Change le nom (modal, max 30 car.). Le **✓** (ouverte) / **✘** (verrouillée) reste toujours à la fin : le bot le remet même si l'owner renomme depuis Discord ou tape un faux ✓/✘. L'emoji de la room reste devant (`🔥\|Nom ✓`). Le panneau (Lock, Unlock, Rename, 18+) n'affiche aucun message de limite : si Discord bloque un rename (2 / 10 min par room), le nouveau nom (et le ✓/✘) est appliqué automatiquement dès que Discord l'autorise. |
 | **Kick** 👞 | Déconnecte un membre du vocal. |
 | **Transfer** 👑 | Transfère la propriété à un autre membre. |
 | **Check Level** 📊 | Rappel : levels = bot séparé (`?level` si installé). |

@@ -969,6 +969,7 @@ async def _room_name_sync_loop(channel_id: int) -> None:
             except discord.HTTPException as exc:
                 print(f"Room name update failed for {channel.name}: {exc.status} {exc.text}")
                 if exc.status != 429:
+                    _room_name_pending.pop(channel_id, None)
                     return
                 _room_name_blocked_until[channel_id] = time.monotonic() + float(
                     getattr(exc, "retry_after", 0) or 60
@@ -998,7 +999,7 @@ async def _queue_room_rename(channel, typed_name: str) -> tuple[str, bool]:
     room_emoji = room_emojis.get(channel.id)
     if room_emoji and room_kinds.get(channel.id) == "lounge":
         base = f"{room_emoji}|{base}"  # keep the room emoji, like on creation (also lets a restart recognise the room)
-    if _channel_has_nsfw_label(channel.name):
+    if _channel_has_nsfw_label(_room_name_pending.get(channel.id, channel.name)):
         base = f"{NSFW_ROOM_NAME_PREFIX}{base}"
     _room_name_pending[channel.id] = base
     final = _desired_room_name(channel) or base[:100]
@@ -1094,67 +1095,26 @@ def _channel_has_nsfw_label(channel_name: str) -> bool:
     return channel_name.startswith(NSFW_ROOM_NAME_PREFIX)
 
 
-async def _apply_nsfw_room_mark(
-    channel: discord.VoiceChannel,
-    *,
-    new_name: str,
-    enabled: bool,
-    reason: str,
-) -> None:
-    await _set_room_name(channel, new_name, reason=reason)
-    room_nsfw_enabled[channel.id] = enabled
-    pending = _room_name_pending.get(channel.id)
-    if pending is not None:  # keep a queued rename in step with the 18+ label
-        plain = _strip_nsfw_room_prefix(pending)
-        _room_name_pending[channel.id] = f"{NSFW_ROOM_NAME_PREFIX}{plain}" if enabled else plain
+def _bot_can_rename(channel) -> bool:
+    me = channel.guild.me
+    return me is not None and channel.permissions_for(me).manage_channels
 
 
-async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, str, float | None]:
-    """Toggle 🔞 prefix on the voice channel name.
+def _toggle_room_nsfw_label(channel) -> tuple[bool, str]:
+    """Toggle the 🔞 prefix on the room name; the room name queue puts it on the channel.
 
-    Returns (enabled, display_name, retry_after_seconds if rate-limited else None).
-    On rate-limit, nothing is scheduled to happen later — the label only ever
-    changes when the owner presses the button and Discord accepts the rename
-    right then. (A background retry that renamed the room automatically
-    minutes later, with no further input from the owner, looked like the
-    label randomly flipping on its own.)
+    Returns (label is now on, the name the room gets).
     """
-    fresh = await channel.guild.fetch_channel(channel.id)
-    if not isinstance(fresh, discord.VoiceChannel):
-        raise TypeError("Channel is not a voice channel")
-
-    has_label = _channel_has_nsfw_label(fresh.name)
-    enabled = not has_label
-    base_name = _strip_nsfw_room_prefix(fresh.name)
-    new_name = f"{NSFW_ROOM_NAME_PREFIX}{base_name}"[:100] if enabled else base_name[:100]
-
-    if fresh.name == new_name:
-        room_nsfw_enabled[fresh.id] = enabled
-        return enabled, new_name, None
-
-    wait = _room_name_wait_seconds(fresh.id)
-    if wait > 0:  # Discord would make us hang on its rename limit — say so right away instead
-        return has_label, fresh.name, wait
-
-    try:
-        await asyncio.wait_for(
-            _apply_nsfw_room_mark(
-                fresh,
-                new_name=new_name,
-                enabled=enabled,
-                reason="Room owner toggled 18+ label",
-            ),
-            timeout=30,
-        )
-        return enabled, new_name, None
-    except asyncio.TimeoutError:
-        _room_name_blocked_until[fresh.id] = time.monotonic() + 60
-        return has_label, fresh.name, 60.0
-    except discord.HTTPException as exc:
-        if exc.status != 429:
-            raise
-        retry_after = float(getattr(exc, "retry_after", 0) or 600)
-        return has_label, fresh.name, retry_after
+    current = _room_name_pending.get(channel.id)
+    if current is None:
+        current = _strip_room_marks(channel.name) if room_kinds.get(channel.id) == "lounge" else channel.name
+    enabled = not _channel_has_nsfw_label(current)
+    plain = _strip_nsfw_room_prefix(current)
+    base = f"{NSFW_ROOM_NAME_PREFIX}{plain}" if enabled else plain
+    room_nsfw_enabled[channel.id] = enabled
+    _room_name_pending[channel.id] = base
+    _schedule_room_name_sync(channel.id)
+    return enabled, _desired_room_name(channel) or base[:100]
 
 
 PANEL_EMOJI_LOCK = discord.PartialEmoji(name="50376", id=1518983212066668675)
@@ -2143,22 +2103,18 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
             return await interaction.response.send_message("Please enter a room name.", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
+        if not _bot_can_rename(fresh):
+            return await interaction.followup.send(
+                "I cannot rename this room (check **Manage Channels**).",
+                ephemeral=True,
+            )
         try:
-            # The ✓ (open) / ✘ (locked) mark always stays last, whatever name is typed. Discord
-            # allows only 2 renames per 10 minutes per room: past that the new name is queued and
-            # applied automatically, never lost and never blocking the panel.
-            final_name, applied = await _queue_room_rename(fresh, typed)
-        except discord.HTTPException as exc:
-            return await interaction.followup.send(f"Could not rename the room. ({exc.text})", ephemeral=True)
-
-        if applied:
-            return await interaction.followup.send(f"Room name updated to: **{final_name}**", ephemeral=True)
-        mins = max(1, int((_room_name_wait_seconds(fresh.id) + 59) // 60))
-        await interaction.followup.send(
-            f"⏳ Discord limits room renames (2 per 10 min). **{final_name}** is queued — "
-            f"it will be applied automatically in ~{mins} min.",
-            ephemeral=True,
-        )
+            # The ✓ (open) / ✘ (locked) mark always stays last, whatever name is typed.
+            final_name, _applied = await _queue_room_rename(fresh, typed)
+        except Exception as exc:
+            print(f"Room rename failed for {fresh.id}: {exc}")
+            return await interaction.followup.send(f"Could not rename the room: {exc}", ephemeral=True)
+        await interaction.followup.send(f"Room name set to: **{final_name}**", ephemeral=True)
 
 
 class ControlPanelView(discord.ui.View):
@@ -2328,31 +2284,21 @@ class ControlPanelView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            enabled, new_name, retry_after = await _toggle_room_nsfw_mark(channel)
-        except discord.Forbidden:
+        if not _bot_can_rename(channel):
             return await interaction.followup.send(
                 "I cannot rename this room (check **Manage Channels**).",
                 ephemeral=True,
             )
-        except discord.HTTPException as exc:
-            return await interaction.followup.send(f"Could not update room: {exc.text}", ephemeral=True)
+        try:
+            enabled, new_name = _toggle_room_nsfw_label(channel)
         except Exception as exc:
             print(f"NSFW toggle failed for {self.channel_id}: {exc}")
             return await interaction.followup.send(f"Could not update room: {exc}", ephemeral=True)
 
-        if retry_after is not None:
-            mins = max(1, int((retry_after + 59) // 60))
-            return await interaction.followup.send(
-                f"⏳ Discord y7eb limit esm el room (2 marrat / 10 min) — **ma tbadletch el label.**\n"
-                f"Stanna ~**{mins} min** w 3awed clicki 3al bouton bech tbadelha (ma yetbadelch b rasso).",
-                ephemeral=True,
-            )
-
         if enabled:
-            msg = f"🔞 **18+** label added — room is now **{new_name}**"
+            msg = f"🔞 **18+** label added — room name: **{new_name}**"
         else:
-            msg = f"🔞 **18+** label removed — room is now **{new_name}**"
+            msg = f"🔞 **18+** label removed — room name: **{new_name}**"
         await interaction.followup.send(msg, ephemeral=True)
 
 
