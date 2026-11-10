@@ -330,13 +330,32 @@ LOUNGE_ROOM_EMOJIS = [
     "🎙️", "🍘", "🍡", "⚡", "🌪️", "🍁", "🎃", "🍩", "🍫", "🌹", "🍧", "🍜", "🍛", "🍝", "🗽",
 ]
 LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
-LOUNGE_ROOM_NAME_SUFFIX = " ✓"
+LOUNGE_ROOM_NAME_SUFFIX = " ✓"  # room is open
+LOUNGE_ROOM_LOCKED_SUFFIX = " ✘"  # room is locked
+LOUNGE_ROOM_SUFFIXES = (LOUNGE_ROOM_NAME_SUFFIX, LOUNGE_ROOM_LOCKED_SUFFIX)
+# Check-style characters stripped from the end of a room name, so nobody can type a fake ✓/✘.
+_ROOM_MARK_CHARS = "✓✔✅☑✘✗✖❌❎️"
 NSFW_ROOM_NAME_PREFIX = "🔞"
+
+
+def _strip_room_marks(name: str) -> str:
+    """Remove trailing ✓/✘-style marks (typed by a user or added by the bot)."""
+    name = name.rstrip()
+    while name and name[-1] in _ROOM_MARK_CHARS:
+        name = name[:-1].rstrip()
+    return name
+
+
+def _lounge_room_name(base: str, *, locked: bool) -> str:
+    """Lounge room name ending with the bot's mark: ✓ when open, ✘ when locked."""
+    suffix = LOUNGE_ROOM_LOCKED_SUFFIX if locked else LOUNGE_ROOM_NAME_SUFFIX
+    base = _strip_room_marks(base) or "room"
+    return f"{base[:100 - len(suffix)].rstrip()}{suffix}"
 
 
 def format_lounge_room_name(member_name: str, emoji: str | None = None) -> str:
     emoji = emoji or random.choice(ROOM_EMOJIS)
-    return f"{emoji}|{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
+    return _lounge_room_name(f"{emoji}|{member_name}", locked=False)
 
 
 JOIN_TO_CREATE_CHANNELS = {
@@ -775,6 +794,52 @@ async def _create_join_to_create_room(member, trigger_channel):
         _join_create_in_progress.discard(member.id)
 
 
+_room_name_sync_tasks: dict[int, asyncio.Task] = {}
+
+
+def _desired_lounge_room_name(channel) -> str | None:
+    """Name a lounge room must have right now (✓ open / ✘ locked); None for other rooms."""
+    if room_kinds.get(channel.id) != "lounge":
+        return None
+    return _lounge_room_name(channel.name, locked=channel.id in locked_rooms)
+
+
+async def _room_name_sync_loop(channel_id: int) -> None:
+    try:
+        for _ in range(5):
+            channel = bot.get_channel(channel_id)
+            if not isinstance(channel, discord.VoiceChannel):
+                return
+            desired = _desired_lounge_room_name(channel)
+            if desired is None or channel.name == desired:
+                return
+            try:
+                # Discord allows only 2 renames per 10 minutes per channel. discord.py waits
+                # for that limit here, in the background, so lock/unlock itself stays instant.
+                await channel.edit(name=desired, reason="Room mark: ✓ open / ✘ locked")
+            except discord.NotFound:
+                return
+            except discord.HTTPException as exc:
+                print(f"Room mark rename failed for {channel.name}: {exc.status} {exc.text}")
+                if exc.status != 429:
+                    return
+                await asyncio.sleep(float(getattr(exc, "retry_after", 0) or 30))
+                continue
+            await asyncio.sleep(2)  # let the gateway update the cached name, then re-check
+    except Exception as exc:
+        print(f"Room mark sync error for {channel_id}: {exc}")
+    finally:
+        _room_name_sync_tasks.pop(channel_id, None)
+
+
+def _schedule_room_name_sync(channel_id: int) -> None:
+    """Make the room name show its real state (✓ open / ✘ locked) in the background."""
+    task = _room_name_sync_tasks.get(channel_id)
+    if task is not None and not task.done():
+        return  # the running task re-checks the latest state itself
+    _room_name_sync_tasks[channel_id] = asyncio.create_task(_room_name_sync_loop(channel_id))
+
+
 async def _set_room_locked(channel, *, locked: bool):
     """Lock = @everyone + Boy/Girl cannot connect; Staff + room owner can."""
     guild = channel.guild
@@ -812,8 +877,10 @@ async def _set_room_locked(channel, *, locked: bool):
                 )
 
         locked_rooms.add(channel.id)
+        _schedule_room_name_sync(channel.id)  # name ends with ✘
     else:
         locked_rooms.discard(channel.id)
+        _schedule_room_name_sync(channel.id)  # name ends with ✓
         await _restore_room_join_permissions(channel, guild)
 
 
@@ -1884,13 +1951,28 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
         fresh = interaction.guild.get_channel(self.channel.id) or self.channel
         # Keep the 🔞 label through a rename instead of silently dropping it —
         # a plain text rename shouldn't undo the owner's 18+ toggle.
-        new_name = self.channel_name.value
+        new_name = _strip_room_marks(self.channel_name.value)
+        if not new_name:
+            return await interaction.response.send_message("Please enter a room name.", ephemeral=True)
         if _channel_has_nsfw_label(fresh.name):
             new_name = f"{NSFW_ROOM_NAME_PREFIX}{new_name}"
+        if room_kinds.get(fresh.id) == "lounge":
+            # The ✓ (open) / ✘ (locked) mark always stays, whatever name is typed.
+            new_name = _lounge_room_name(new_name, locked=fresh.id in locked_rooms)
         new_name = new_name[:100]
 
-        await self.channel.edit(name=new_name)
-        await interaction.response.send_message(f"Room name updated to: **{new_name}**", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            # Discord allows 2 renames per 10 minutes per channel — do not hang on the limit.
+            await asyncio.wait_for(self.channel.edit(name=new_name), timeout=20)
+        except asyncio.TimeoutError:
+            return await interaction.followup.send(
+                "Discord limits room renames (2 per 10 minutes). Try again in a few minutes.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"Could not rename the room. ({exc.text})", ephemeral=True)
+        await interaction.followup.send(f"Room name updated to: **{new_name}**", ephemeral=True)
 
 
 class ControlPanelView(discord.ui.View):
@@ -1980,7 +2062,8 @@ class ControlPanelView(discord.ui.View):
 
         await _set_room_locked(channel, locked=True)
         await interaction.response.send_message(
-            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect.",
+            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect. "
+            "The room name will end with **✘**.",
             ephemeral=True,
         )
 
@@ -1992,7 +2075,10 @@ class ControlPanelView(discord.ui.View):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
         await _set_room_locked(channel, locked=False)
-        await interaction.response.send_message("Room unlocked — others can join again.", ephemeral=True)
+        await interaction.response.send_message(
+            "Room unlocked — others can join again. The room name will end with **✓**.",
+            ephemeral=True,
+        )
 
     async def rename_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
@@ -2333,7 +2419,7 @@ _LOUNGE_NAME_EMOJIS = tuple(dict.fromkeys([*LOUNGE_ROOM_EMOJIS, *ROOM_EMOJIS]))
 
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
     name = _strip_nsfw_room_prefix(channel_name)
-    if any(name.startswith(f"{emoji}|") for emoji in _LOUNGE_NAME_EMOJIS) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
+    if any(name.startswith(f"{emoji}|") for emoji in _LOUNGE_NAME_EMOJIS) and name.endswith(LOUNGE_ROOM_SUFFIXES):
         return "lounge"
     if name.endswith("'s Lounge"):
         return "lounge"
@@ -2450,6 +2536,11 @@ async def _cleanup_and_register_temp_rooms(guild):
                 owners[voice_channel.id] = owner.id
             room_kinds[voice_channel.id] = kind
             room_nsfw_enabled[voice_channel.id] = voice_channel.name.startswith(NSFW_ROOM_NAME_PREFIX)
+            if kind == "lounge":
+                # The name carries the lock state (✘ = locked), so restore it after a restart.
+                if voice_channel.name.rstrip().endswith(LOUNGE_ROOM_LOCKED_SUFFIX):
+                    locked_rooms.add(voice_channel.id)
+                _schedule_room_name_sync(voice_channel.id)
             print(
                 f"Re-registered temp room: {voice_channel.name} "
                 f"(kind={kind}, owner={owner.display_name if owner else 'unknown'})"
@@ -5495,6 +5586,16 @@ async def on_member_update(before, after):
             await after.edit(mute=False, reason="Voice mute role removed")
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"Voice unmute on role removal failed for {after.id}: {exc}")
+
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    """Owners can also rename their room from Discord itself — put the ✓/✘ mark back if it was dropped or faked."""
+    if not isinstance(after, discord.VoiceChannel) or before.name == after.name:
+        return
+    desired = _desired_lounge_room_name(after)
+    if desired is not None and after.name != desired:
+        _schedule_room_name_sync(after.id)
 
 
 @bot.event

@@ -27,9 +27,9 @@
 
 | Bouton | Action |
 |--------|--------|
-| **Lock** 🔒 | Verrouille : @everyone + Boy/Girl ne peuvent plus rejoindre. Staff + owner OK. |
-| **Unlock** 🔓 | Déverrouille la room. |
-| **Rename** 📝 | Change le nom (modal, max 30 car.). |
+| **Lock** 🔒 | Verrouille : @everyone + Boy/Girl ne peuvent plus rejoindre. Staff + owner OK. Le nom de la room finit par **✘**. |
+| **Unlock** 🔓 | Déverrouille la room. Le nom finit par **✓**. |
+| **Rename** 📝 | Change le nom (modal, max 30 car.). Le **✓** (ouverte) / **✘** (verrouillée) reste toujours à la fin : le bot le remet même si l'owner renomme depuis Discord ou tape un faux ✓/✘. |
 | **Kick** 👞 | Déconnecte un membre du vocal. |
 | **Transfer** 👑 | Transfère la propriété à un autre membre. |
 | **Check Level** 📊 | Rappel : levels = bot séparé (`?level` si installé). |
